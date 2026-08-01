@@ -65,6 +65,12 @@ export async function getPortfolioSummary(
   };
 }
 
+// Platform fees (realistic simulation)
+// Kraken: ~0.26% taker | Coinbase Advanced: ~0.60% taker
+// We use Kraken rates as default (better fees)
+// Aller-retour total: ~0.52% (buy + sell)
+const PLATFORM_FEE_RATE = 0.0026; // 0.26% per transaction (Kraken taker)
+
 export async function executePaperTrade(
   decision: BotDecision,
   currentPrice: MarketData,
@@ -84,7 +90,7 @@ export async function executePaperTrade(
         };
       }
 
-      const fee = decision.amount_eur * 0.001;
+      const fee = decision.amount_eur * PLATFORM_FEE_RATE;
       const netAmount = decision.amount_eur - fee;
       const cryptoAmount = netAmount / currentPrice.price_eur;
 
@@ -152,7 +158,7 @@ export async function executePaperTrade(
         parseFloat(str(holding, 'amount')) * currentPrice.price_eur;
       const sellValue = Math.min(decision.amount_eur, currentHoldingValue);
       const cryptoToSell = sellValue / currentPrice.price_eur;
-      const fee = sellValue * 0.001;
+      const fee = sellValue * PLATFORM_FEE_RATE;
       const eurReceived = sellValue - fee;
 
       const newAmount = parseFloat(str(holding, 'amount')) - cryptoToSell;

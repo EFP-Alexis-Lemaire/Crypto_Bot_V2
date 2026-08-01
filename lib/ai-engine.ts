@@ -182,6 +182,13 @@ Prends des décisions de trading RÉFLÉCHIES pour le portefeuille suivant.
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
 Taux EUR/USD: ${context.eurUsdRate} (FAVORISE les paires EUR quand disponibles)
 
+=== FRAIS DE PLATEFORME (CRITIQUE) ===
+Frais par transaction: 0.26% (Kraken taker)
+Coût aller-retour complet (achat + vente future): ~0.52%
+→ Un trade de 750€ coûte ~3.90€ en frais aller-retour
+→ NE JAMAIS prendre un trade si le potentiel de gain est < 1.5% (en dessous du seuil de rentabilité avec frais)
+→ Objectif minimum de gain NET après frais: au moins 2% pour que le trade ait du sens
+
 === CANDIDATS ANALYSÉS ===
 ${candidateData.map(m => {
   const tech = technicals.find(t => t.symbol === m.symbol);
@@ -221,6 +228,8 @@ ${portfolioDetail}
 5. Priorise qualité sur quantité (mieux vaut 1 bon trade que 5 moyens)
 6. Pour les petites cryptos: réduction de position obligatoire (max 5% par position)
 7. Si tu vends, précise pourquoi maintenant et pas plus tôt ou plus tard
+8. FRAIS: chaque trade coûte ~0.26% à l'achat ET ~0.26% à la vente = 0.52% aller-retour. Ne recommande un achat que si tu estimes un potentiel de +3% minimum NET (pour couvrir les frais + générer un vrai gain)
+9. ÉVITE les trades "timides" à faible conviction — si confiance < 65%, dis SKIP plutôt que d'entrer avec un petit montant
 
 Retourne un JSON avec tes décisions:
 {
