@@ -9,6 +9,7 @@ export const metadata: Metadata = {
   description: 'Bot de trading crypto alimenté par GPT-4',
 };
 
+
 export default function RootLayout({
   children,
 }: {
