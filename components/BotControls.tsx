@@ -47,16 +47,22 @@ export default function BotControls({ config, onConfigChange }: Props) {
     setRunning(true);
     setMessage('Analyse en cours...');
     try {
-      const res = await fetch('/api/cron/analyze');
+      const res = await fetch('/api/bot/trigger', {
+        method: 'POST',
+      });
       const data = await res.json();
-      setMessage(
-        `✅ Analyse terminée: ${data.trades_executed ?? 0} trade(s) exécuté(s)`
-      );
-    } catch {
-      setMessage('❌ Erreur lors de l\'analyse');
+      if (!res.ok) {
+        setMessage(`❌ Erreur ${res.status}: ${data.error ?? 'inconnue'}`);
+      } else {
+        const trades = data.trades_executed ?? 0;
+        const decisions = (data.decisions ?? []).length;
+        setMessage(`✅ Terminé — ${trades} trade(s) exécuté(s), ${decisions} décision(s) analysée(s)`);
+      }
+    } catch (err) {
+      setMessage(`❌ Erreur réseau: ${err}`);
     } finally {
       setRunning(false);
-      setTimeout(() => setMessage(''), 5000);
+      setTimeout(() => setMessage(''), 8000);
     }
   };
 
