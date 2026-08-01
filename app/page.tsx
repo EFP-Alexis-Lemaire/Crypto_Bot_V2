@@ -16,6 +16,7 @@ import HoldingsPieChart from '@/components/HoldingsPieChart';
 import DecisionCard from '@/components/DecisionCard';
 import MarketTable from '@/components/MarketTable';
 import BotControls from '@/components/BotControls';
+import CycleHistory from '@/components/CycleHistory';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
 interface Snapshot {
@@ -39,6 +40,18 @@ interface Decision {
   market_data?: { price_eur?: number; change_24h?: number; fear_greed?: number };
 }
 
+interface Cycle {
+  cycle_id: string;
+  started_at: string;
+  total_decisions: number;
+  buys: number;
+  sells: number;
+  holds: number;
+  skips: number;
+  model_used: string;
+  decisions: Decision[];
+}
+
 interface Trade {
   id: number;
   symbol: string;
@@ -58,7 +71,7 @@ interface NewsItem {
   sentiment: string;
 }
 
-type TabKey = 'overview' | 'decisions' | 'trades' | 'market' | 'news';
+type TabKey = 'overview' | 'cycles' | 'decisions' | 'trades' | 'market' | 'news';
 
 export default function Dashboard() {
   const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null);
@@ -75,17 +88,19 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [cycles, setCycles] = useState<Cycle[]>([]);
   const isMounted = useRef(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes] =
         await Promise.all([
           fetch('/api/portfolio'),
           fetch('/api/decisions?limit=20'),
           fetch('/api/trades?limit=30'),
           fetch('/api/market'),
           fetch('/api/config'),
+          fetch('/api/cycles?limit=30'),
         ]);
 
       if (portfolioRes.ok) {
@@ -114,6 +129,11 @@ export default function Dashboard() {
       if (configRes.ok) {
         const data = await configRes.json();
         setConfig(data.config ?? {});
+      }
+
+      if (cyclesRes.ok) {
+        const data = await cyclesRes.json();
+        setCycles(data.cycles ?? []);
       }
 
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
@@ -158,6 +178,7 @@ export default function Dashboard() {
 
   const tabs: { key: TabKey; label: string; icon: React.ElementType }[] = [
     { key: 'overview', label: 'Vue d\'ensemble', icon: BarChart2 },
+    { key: 'cycles', label: 'Historique cycles', icon: Activity },
     { key: 'decisions', label: 'Décisions IA', icon: Bot },
     { key: 'trades', label: 'Trades', icon: Activity },
     { key: 'market', label: 'Marché', icon: TrendingUp },
@@ -406,6 +427,20 @@ export default function Dashboard() {
               config={config as unknown as { risk_level: string; is_active: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
               onConfigChange={fetchAll}
             />
+          </div>
+        )}
+
+        {/* CYCLES TAB */}
+        {activeTab === 'cycles' && (
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-white font-bold text-lg flex items-center gap-2">
+                <Activity className="w-5 h-5 text-blue-400" />
+                Historique des cycles d&apos;analyse
+              </h2>
+              <span className="text-gray-500 text-sm">{cycles.length} cycle{cycles.length > 1 ? 's' : ''}</span>
+            </div>
+            <CycleHistory cycles={cycles} />
           </div>
         )}
 
