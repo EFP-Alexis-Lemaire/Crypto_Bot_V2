@@ -118,8 +118,13 @@ export default function BotControls({ config, onConfigChange }: Props) {
     setLoading(true);
     setMessage('📤 Envoi du rapport...');
     try {
-      await fetch('/api/cron/daily-report');
-      setMessage('✅ Rapport Telegram envoyé');
+      const res = await fetch('/api/bot/report', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        setMessage(`❌ Erreur ${res.status}: ${data.error ?? 'inconnue'}`);
+      } else {
+        setMessage('✅ Rapport Telegram envoyé');
+      }
     } catch {
       setMessage('❌ Erreur Telegram');
     } finally {
