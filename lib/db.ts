@@ -130,5 +130,21 @@ export async function initializeDatabase() {
     ON CONFLICT DO NOTHING
   `;
 
+  // AI costs tracking table
+  await db`
+    CREATE TABLE IF NOT EXISTS ai_costs (
+      id SERIAL PRIMARY KEY,
+      cycle_id VARCHAR(50),
+      model VARCHAR(50) NOT NULL,
+      prompt_tokens INTEGER NOT NULL DEFAULT 0,
+      completion_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      cost_usd DECIMAL(10, 6) NOT NULL DEFAULT 0,
+      cost_eur DECIMAL(10, 6) NOT NULL DEFAULT 0,
+      purpose VARCHAR(50) DEFAULT 'analysis',
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+  `;
+
   console.log('Database initialized successfully');
 }

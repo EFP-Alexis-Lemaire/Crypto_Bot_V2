@@ -7,6 +7,7 @@ import { sendTelegramMessage } from '@/lib/telegram';
 import OpenAI from 'openai';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
+import { logAICost } from '@/lib/ai-costs';
 
 export const maxDuration = 45;
 
@@ -95,6 +96,11 @@ Génère un rapport JSON structuré et précis:
     max_tokens: 800,
     response_format: { type: 'json_object' },
   });
+
+  // Log AI cost
+  if (response.usage) {
+    await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'morning-report');
+  }
 
   const parsed = JSON.parse(response.choices[0].message.content ?? '{}');
 

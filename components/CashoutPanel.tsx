@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronUp,
   Landmark,
+  Bot,
 } from 'lucide-react';
 import { PortfolioSummary } from '@/lib/types';
 
@@ -21,10 +22,20 @@ interface Trade {
   fee_eur: number;
 }
 
+interface AICosts {
+  total_usd: number;
+  total_eur: number;
+  total_tokens: number;
+  calls_count: number;
+  by_model: Array<{ model: string; calls: number; tokens: number; cost_usd: number; cost_eur: number }>;
+  last_30_days_usd: number;
+}
+
 interface Props {
   portfolio: PortfolioSummary;
   trades: Trade[];
   initialInvestment?: number;
+  aiCosts?: AICosts | null;
 }
 
 function TaxRow({ label, rate, gain, note, color }: {
@@ -62,7 +73,7 @@ function TaxRow({ label, rate, gain, note, color }: {
   );
 }
 
-export default function CashoutPanel({ portfolio, trades, initialInvestment = 5000 }: Props) {
+export default function CashoutPanel({ portfolio, trades, initialInvestment = 5000, aiCosts }: Props) {
   const [showTaxDetails, setShowTaxDetails] = useState(false);
 
   // Calculate realized PnL from closed trades
@@ -169,8 +180,46 @@ export default function CashoutPanel({ portfolio, trades, initialInvestment = 50
           </div>
         </div>
 
-        {/* Recommendation */}
-        {recommendation && (
+        {/* AI Costs */}
+        {aiCosts && (
+          <div className="bg-gray-800/40 border border-gray-700/50 rounded-xl p-3.5">
+            <div className="flex items-center gap-2 mb-2.5">
+              <Bot className="w-4 h-4 text-purple-400" />
+              <span className="text-gray-300 text-sm font-semibold">Frais IA (OpenAI)</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs mb-2.5">
+              <div>
+                <div className="text-gray-500 mb-0.5">Total dépensé</div>
+                <div className="text-white font-bold">${aiCosts.total_usd.toFixed(4)}</div>
+                <div className="text-gray-600">{aiCosts.total_eur.toFixed(4)}€</div>
+              </div>
+              <div>
+                <div className="text-gray-500 mb-0.5">30 derniers jours</div>
+                <div className="text-purple-400 font-bold">${aiCosts.last_30_days_usd.toFixed(4)}</div>
+              </div>
+              <div>
+                <div className="text-gray-500 mb-0.5">Nb appels</div>
+                <div className="text-white font-bold">{aiCosts.calls_count}</div>
+                <div className="text-gray-600">{(aiCosts.total_tokens / 1000).toFixed(0)}k tokens</div>
+              </div>
+            </div>
+            {aiCosts.by_model.length > 0 && (
+              <div className="space-y-1">
+                {aiCosts.by_model.map(m => (
+                  <div key={m.model} className="flex items-center justify-between text-xs">
+                    <span className="text-gray-500 font-mono">{m.model}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-600">{m.calls} appels</span>
+                      <span className="text-gray-400 font-medium">${m.cost_usd.toFixed(4)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Recommendation */}        {recommendation && (
           <div className={`p-3.5 rounded-xl border ${recommendation.bg}`}>
             <div className={`text-sm font-semibold mb-1 ${recommendation.color}`}>
               💡 {recommendation.label}

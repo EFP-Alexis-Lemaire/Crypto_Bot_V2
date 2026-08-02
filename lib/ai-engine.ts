@@ -7,6 +7,7 @@ import {
   RiskLevel,
   RISK_CONFIGS,
 } from './types';
+import { logAICost } from './ai-costs';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -54,6 +55,11 @@ export async function analyzeMarketWithAI(
       response_format: { type: 'json_object' },
     });
     candidatesJson = screeningResponse.choices[0].message.content ?? '{"candidates":[]}';
+
+    // Log AI cost
+    if (screeningResponse.usage) {
+      await logAICost('gpt-4o-mini', screeningResponse.usage, context.eurUsdRate, undefined, 'screening');
+    }
   } catch (error) {
     console.error('Screening error:', error);
     return [];
@@ -93,6 +99,11 @@ export async function analyzeMarketWithAI(
       response_format: { type: 'json_object' },
     });
     decisionJson = decisionResponse.choices[0].message.content ?? '{"decisions":[]}';
+
+    // Log AI cost
+    if (decisionResponse.usage) {
+      await logAICost('gpt-4o', decisionResponse.usage, context.eurUsdRate, undefined, 'decision');
+    }
   } catch (error) {
     console.error('Decision error:', error);
     return [];

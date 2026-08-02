@@ -93,11 +93,12 @@ export default function Dashboard() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [morningReport, setMorningReport] = useState<Record<string, unknown> | null>(null);
+  const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
   const isMounted = useRef(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes] =
         await Promise.all([
           fetch('/api/portfolio'),
           fetch('/api/decisions?limit=20'),
@@ -106,6 +107,7 @@ export default function Dashboard() {
           fetch('/api/config'),
           fetch('/api/cycles?limit=30'),
           fetch('/api/morning-report'),
+          fetch('/api/ai-costs'),
         ]);
 
       if (portfolioRes.ok) {
@@ -144,6 +146,11 @@ export default function Dashboard() {
       if (morningRes.ok) {
         const data = await morningRes.json();
         setMorningReport(data.report ?? null);
+      }
+
+      if (aiCostsRes.ok) {
+        const data = await aiCostsRes.json();
+        setAiCosts(data.costs ?? null);
       }
 
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
@@ -448,6 +455,7 @@ export default function Dashboard() {
                 portfolio={portfolio ?? { total_value_eur: 5000, cash_eur: 5000, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }}
                 trades={trades}
                 initialInvestment={5000}
+                aiCosts={aiCosts as Parameters<typeof CashoutPanel>[0]['aiCosts']}
               />
             </div>
           </div>
