@@ -17,6 +17,7 @@ import DecisionCard from '@/components/DecisionCard';
 import MarketTable from '@/components/MarketTable';
 import BotControls from '@/components/BotControls';
 import CycleHistory from '@/components/CycleHistory';
+import CashoutPanel from '@/components/CashoutPanel';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
 interface Snapshot {
@@ -61,6 +62,7 @@ interface Trade {
   total_eur: number;
   executed_at: string;
   confidence: number;
+  fee_eur: number;
 }
 
 interface NewsItem {
@@ -422,11 +424,18 @@ export default function Dashboard() {
               </div>
             )}
 
-            {/* Bot Controls */}
-            <BotControls
-              config={config as unknown as { risk_level: string; is_active: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
-              onConfigChange={fetchAll}
-            />
+            {/* Bot Controls + Cashout side by side */}
+            <div className="grid lg:grid-cols-2 gap-4">
+              <BotControls
+                config={config as unknown as { risk_level: string; is_active: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
+                onConfigChange={fetchAll}
+              />
+              <CashoutPanel
+                portfolio={portfolio ?? { total_value_eur: 5000, cash_eur: 5000, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }}
+                trades={trades}
+                initialInvestment={5000}
+              />
+            </div>
           </div>
         )}
 
