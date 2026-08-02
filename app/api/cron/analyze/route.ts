@@ -184,6 +184,18 @@ export async function GET(request: Request) {
       eurUsdRate,
     });
 
+    // Always log the cycle, even if no decisions
+    if (decisions.length === 0) {
+      await sql`
+        INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+        VALUES (
+          ${cycleId}, NULL, 'SKIP',
+          ${`Aucune opportunité identifiée. Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label}). Aucun setup ne justifie les frais (~0.52% aller-retour). Portefeuille: ${portfolio.total_value_eur.toFixed(2)}€.`},
+          0, 0, 'gpt-4o'
+        )
+      `;
+    }
+
     // Execute decisions
     const executedTrades: { decision: BotDecision; result: { success: boolean; message: string } }[] = [];
 

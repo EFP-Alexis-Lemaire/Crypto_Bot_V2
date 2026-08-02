@@ -142,6 +142,18 @@ export async function POST() {
     });
 
     let tradesExecuted = 0;
+
+    // Always log the cycle, even if no decisions
+    if (decisions.length === 0) {
+      await sql`
+        INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+        VALUES (
+          ${cycleId}, NULL, 'SKIP',
+          ${`Aucune opportunité identifiée. Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label}). Marché analysé mais aucun setup ne justifie les frais de transaction (~0.52% aller-retour). Portefeuille: ${portfolio.total_value_eur.toFixed(2)}€.`},
+          0, 0, 'gpt-4o'
+        )
+      `;
+    }
     for (const decision of decisions) {
       if (decision.action === 'HOLD' || decision.action === 'SKIP') {
         await sql`
