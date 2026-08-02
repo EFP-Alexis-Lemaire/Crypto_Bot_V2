@@ -18,6 +18,7 @@ import MarketTable from '@/components/MarketTable';
 import BotControls from '@/components/BotControls';
 import CycleHistory from '@/components/CycleHistory';
 import CashoutPanel from '@/components/CashoutPanel';
+import MorningReport from '@/components/MorningReport';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
 interface Snapshot {
@@ -91,11 +92,12 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [cycles, setCycles] = useState<Cycle[]>([]);
+  const [morningReport, setMorningReport] = useState<Record<string, unknown> | null>(null);
   const isMounted = useRef(false);
 
   const fetchAll = useCallback(async () => {
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes] =
         await Promise.all([
           fetch('/api/portfolio'),
           fetch('/api/decisions?limit=20'),
@@ -103,6 +105,7 @@ export default function Dashboard() {
           fetch('/api/market'),
           fetch('/api/config'),
           fetch('/api/cycles?limit=30'),
+          fetch('/api/morning-report'),
         ]);
 
       if (portfolioRes.ok) {
@@ -136,6 +139,11 @@ export default function Dashboard() {
       if (cyclesRes.ok) {
         const data = await cyclesRes.json();
         setCycles(data.cycles ?? []);
+      }
+
+      if (morningRes.ok) {
+        const data = await morningRes.json();
+        setMorningReport(data.report ?? null);
       }
 
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
@@ -272,6 +280,12 @@ export default function Dashboard() {
         {/* OVERVIEW TAB */}
         {activeTab === 'overview' && (
           <div className="space-y-6">
+            {/* Morning Report */}
+            <MorningReport
+              report={morningReport as Parameters<typeof MorningReport>[0]['report']}
+              onRefresh={fetchAll}
+            />
+
             {/* KPI Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
