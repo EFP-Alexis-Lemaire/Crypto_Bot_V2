@@ -129,6 +129,14 @@ export async function GET(request: Request) {
     // Check stop-loss / take-profit first
     console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData);
+
+    // Track recently sold symbols to prevent immediate rebuy
+    const recentlySoldResult = (await sql`
+      SELECT DISTINCT symbol FROM trades
+      WHERE action = 'SELL'
+      AND executed_at > NOW() - INTERVAL '4 hours'
+    `) as Array<{ symbol: string }>;
+    const recentlySold = new Set(recentlySoldResult.map(r => r.symbol));
     
     for (const slAction of stopLossActions) {
       const marketCoin = allMarketData.find(m => m.symbol === slAction.symbol);
@@ -200,6 +208,17 @@ export async function GET(request: Request) {
     const executedTrades: { decision: BotDecision; result: { success: boolean; message: string } }[] = [];
 
     for (const decision of decisions) {
+      // Block immediate rebuy of recently sold symbols
+      if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
+        console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — sold within last 4h`);
+        await sql`
+          INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+          VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+            ${'Rachat bloqué: ' + decision.symbol + ' a été vendu dans les 4 dernières heures. Délai de cooldown respecté.'},
+            0, 0, 'cooldown-rule')
+        `;
+        continue;
+      }
       if (decision.action === 'HOLD' || decision.action === 'SKIP') {
         // Log but don't execute
         await sql`

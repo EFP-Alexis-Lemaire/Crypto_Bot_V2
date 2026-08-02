@@ -10,10 +10,6 @@ export const maxDuration = 30;
 
 type Row = Record<string, unknown>;
 
-function strVal(row: Row | undefined, field: string): string {
-  return String(row?.[field] ?? '0');
-}
-
 export async function GET(request: Request) {
   const authHeader = request.headers.get('authorization');
   if (
@@ -31,32 +27,34 @@ export async function GET(request: Request) {
 
     const portfolio = await getPortfolioSummary(marketData);
 
-    // Get today's decisions
-    const todayDecisions = (await sql`
-      SELECT * FROM bot_decisions
-      WHERE decided_at > NOW() - INTERVAL '24 hours'
-      AND action IN ('BUY', 'SELL')
-      ORDER BY decided_at DESC
+    // Get today's actual trades WITH amounts (from trades table, not bot_decisions)
+    const todayTrades = (await sql`
+      SELECT
+        t.symbol,
+        t.action,
+        t.total_eur,
+        t.price_eur,
+        t.confidence,
+        t.reasoning,
+        t.executed_at
+      FROM trades t
+      WHERE t.executed_at > NOW() - INTERVAL '24 hours'
+      AND t.action IN ('BUY', 'SELL')
+      ORDER BY t.executed_at DESC
+      LIMIT 10
     `) as Row[];
 
-    const decisions: BotDecision[] = todayDecisions.map((d) => ({
-      symbol: String(d.symbol ?? ''),
-      action: String(d.action ?? 'HOLD') as 'BUY' | 'SELL',
-      amount_eur: 0,
-      reasoning: String(d.reasoning ?? ''),
-      confidence: Number(d.confidence ?? 0),
-      risk_score: Number(d.risk_score ?? 0),
+    const decisions: BotDecision[] = todayTrades.map((t) => ({
+      symbol: String(t.symbol ?? ''),
+      action: String(t.action ?? 'BUY') as 'BUY' | 'SELL',
+      amount_eur: parseFloat(String(t.total_eur ?? 0)),
+      reasoning: String(t.reasoning ?? ''),
+      confidence: Number(t.confidence ?? 0),
+      risk_score: 0,
       timeframe: '',
     }));
 
-    // Count actual trades
-    const tradeCountResult = (await sql`
-      SELECT COUNT(*) as count FROM trades
-      WHERE executed_at > NOW() - INTERVAL '24 hours'
-      AND action IN ('BUY', 'SELL')
-    `) as Row[];
-
-    const tradesCount = parseInt(strVal(tradeCountResult[0], 'count'));
+    const tradesCount = todayTrades.length;
 
     const marketSentiment =
       fearGreed.value < 25

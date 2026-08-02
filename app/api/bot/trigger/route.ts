@@ -99,6 +99,14 @@ export async function POST() {
 
     // Check stop-loss / take-profit
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData);
+
+    // Track recently sold to prevent immediate rebuy
+    const recentlySoldResult = (await sql`
+      SELECT DISTINCT symbol FROM trades
+      WHERE action = 'SELL'
+      AND executed_at > NOW() - INTERVAL '4 hours'
+    `) as Array<{ symbol: string }>;
+    const recentlySold = new Set(recentlySoldResult.map(r => r.symbol));
     for (const slAction of stopLossActions) {
       const marketCoin = allMarketData.find(m => m.symbol === slAction.symbol);
       if (!marketCoin) continue;
@@ -155,6 +163,18 @@ export async function POST() {
       `;
     }
     for (const decision of decisions) {
+      // Block immediate rebuy of recently sold symbols
+      if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
+        console.log(`[Trigger] Skipping BUY ${decision.symbol} — sold within last 4h (cooldown)`);
+        await sql`
+          INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+          VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+            ${'Rachat bloqué: ' + decision.symbol + ' a été vendu dans les 4 dernières heures. Cooldown actif.'},
+            0, 0, 'cooldown-rule')
+        `;
+        continue;
+      }
+
       if (decision.action === 'HOLD' || decision.action === 'SKIP') {
         await sql`
           INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
