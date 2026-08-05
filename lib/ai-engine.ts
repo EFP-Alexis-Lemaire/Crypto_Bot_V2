@@ -9,6 +9,7 @@ import {
 } from './types';
 import { logAICost } from './ai-costs';
 import { getDefiTVL } from './market-data';
+import { getBotMemory, formatMemoryForPrompt } from './memory';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -37,6 +38,10 @@ export async function analyzeMarketWithAI(
   context: AnalysisContext
 ): Promise<BotDecision[]> {
   const riskConfig = RISK_CONFIGS[context.riskLevel];
+
+  // Load bot memory in parallel with screening
+  const memory = await getBotMemory();
+  const memoryText = formatMemoryForPrompt(memory);
 
   // Step 1: Fast pre-screening with GPT-4o-mini
   const screeningPrompt = buildScreeningPrompt(context);
@@ -78,7 +83,7 @@ export async function analyzeMarketWithAI(
   if (candidates.length === 0) return [];
 
   // Step 2: Deep analysis with GPT-4o on top candidates only
-  const decisionPrompt = buildDecisionPrompt(context, candidates, riskConfig);
+  const decisionPrompt = buildDecisionPrompt(context, candidates, riskConfig, memoryText);
 
   let decisionJson: string;
   try {
@@ -171,7 +176,8 @@ Retourne un JSON avec les symboles candidats:
 function buildDecisionPrompt(
   context: AnalysisContext,
   candidates: string[],
-  riskConfig: ReturnType<typeof Object.values>[0]
+  riskConfig: ReturnType<typeof Object.values>[0],
+  memoryText: string
 ): string {
   const candidateData = context.marketData.filter(m =>
     candidates.includes(m.symbol)
@@ -190,6 +196,8 @@ function buildDecisionPrompt(
 
   return `
 Prends des décisions de trading RÉFLÉCHIES pour le portefeuille suivant.
+
+${memoryText}
 
 === CONTEXTE MARCHÉ ===
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
