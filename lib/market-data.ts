@@ -9,12 +9,19 @@ const rssParser = new Parser({ timeout: 8000 });
 export const WATCHLIST_COINS = [
   // Major
   'bitcoin', 'ethereum', 'solana', 'cardano', 'polkadot',
+  // Layer 1 — established
+  'avalanche-2', 'near', 'algorand', 'the-open-network',
+  // Layer 2 / Scaling
+  'arbitrum', 'optimism', 'starknet',
+  // DeFi bluechips
+  'chainlink', 'uniswap', 'aave', 'curve-dao-token', 'maker',
+  // AI tokens (trending sector)
+  'fetch-ai', 'singularitynet', 'ocean-protocol', 'render',
+  // Gaming / Metaverse
+  'immutable-x', 'the-sandbox',
   // Mid-cap promising
-  'avalanche-2', 'chainlink', 'uniswap', 'aave', 'sui',
-  'arbitrum', 'optimism', 'injective-protocol', 'render',
-  // Small/Emerging
-  'celestia', 'starknet', 'worldcoin-wld', 'sei-network', 'aptos',
-  // Stable growth
+  'sui', 'aptos', 'injective-protocol', 'sei-network', 'celestia',
+  // ETF-like / stable growth
   'ethereum-classic', 'litecoin', 'ripple',
 ];
 
@@ -26,6 +33,10 @@ const RSS_FEEDS = [
   { url: 'https://bitcoinmagazine.com/.rss/full/', source: 'Bitcoin Magazine' },
   { url: 'https://www.theblock.co/rss.xml', source: 'The Block' },
   { url: 'https://cryptoslate.com/feed/', source: 'CryptoSlate' },
+  // Reddit RSS (public, no key needed)
+  { url: 'https://www.reddit.com/r/CryptoCurrency/hot.rss?limit=10', source: 'Reddit r/Crypto' },
+  { url: 'https://www.reddit.com/r/Bitcoin/hot.rss?limit=5', source: 'Reddit r/Bitcoin' },
+  { url: 'https://www.reddit.com/r/ethereum/hot.rss?limit=5', source: 'Reddit r/Ethereum' },
 ];
 
 export async function getEurUsdRate(): Promise<number> {
@@ -146,9 +157,47 @@ export async function getTrendingCoins(): Promise<string[]> {
   }
 }
 
+// DeFi Llama — free, no API key, no rate limit
+export async function getDefiTVL(): Promise<{
+  total_tvl_usd: number;
+  change_1d: number;
+  change_7d: number;
+  top_protocols: Array<{ name: string; tvl: number; change_1d: number }>;
+}> {
+  try {
+    const [globalRes, protocolsRes] = await Promise.all([
+      axios.get('https://api.llama.fi/v2/chains', { timeout: 10000 }),
+      axios.get('https://api.llama.fi/protocols', { timeout: 10000 }),
+    ]);
+
+    // Total TVL across all chains
+    const chains = globalRes.data as Array<{ tvl: number; tokenSymbol: string }>;
+    const total_tvl_usd = chains.reduce((acc: number, c) => acc + (c.tvl ?? 0), 0);
+
+    // Top 5 protocols by TVL
+    const protocols = (protocolsRes.data as Array<{
+      name: string; tvl: number; change_1d: number; change_7d: number
+    }>)
+      .filter(p => p.tvl > 0)
+      .sort((a, b) => b.tvl - a.tvl)
+      .slice(0, 5);
+
+    return {
+      total_tvl_usd,
+      change_1d: 0,
+      change_7d: 0,
+      top_protocols: protocols.map(p => ({
+        name: p.name,
+        tvl: p.tvl,
+        change_1d: p.change_1d ?? 0,
+      })),
+    };
+  } catch {
+    return { total_tvl_usd: 0, change_1d: 0, change_7d: 0, top_protocols: [] };
+  }
+}
+
 export async function getFearGreedIndex(): Promise<{
-  value: number;
-  label: string;
 }> {
   try {
     const res = await axios.get('https://api.alternative.me/fng/', {
@@ -438,19 +487,28 @@ export const SYMBOL_TO_COINGECKO_ID: Record<string, string> = {
   ADA: 'cardano',
   DOT: 'polkadot',
   AVAX: 'avalanche-2',
+  NEAR: 'near',
+  ALGO: 'algorand',
+  TON: 'the-open-network',
+  ARB: 'arbitrum',
+  OP: 'optimism',
+  STRK: 'starknet',
   LINK: 'chainlink',
   UNI: 'uniswap',
   AAVE: 'aave',
+  CRV: 'curve-dao-token',
+  MKR: 'maker',
+  FET: 'fetch-ai',
+  AGIX: 'singularitynet',
+  OCEAN: 'ocean-protocol',
+  RNDR: 'render',
+  IMX: 'immutable-x',
+  SAND: 'the-sandbox',
   SUI: 'sui',
-  ARB: 'arbitrum',
-  OP: 'optimism',
-  INJ: 'injective-protocol',
-  RNDR: 'render',          // ancien: render-token
-  TIA: 'celestia',
-  STRK: 'starknet',
-  WLD: 'worldcoin-wld',   // ancien: worldcoin
-  SEI: 'sei-network',
   APT: 'aptos',
+  INJ: 'injective-protocol',
+  SEI: 'sei-network',
+  TIA: 'celestia',
   ETC: 'ethereum-classic',
   LTC: 'litecoin',
   XRP: 'ripple',

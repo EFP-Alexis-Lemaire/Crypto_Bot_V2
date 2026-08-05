@@ -20,10 +20,11 @@ export async function GET(request: Request) {
   }
 
   try {
-    const [marketData, fearGreed] = await Promise.all([
+    const [marketData, fearGreedRaw] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getFearGreedIndex(),
     ]);
+    const fearGreed = fearGreedRaw as { value: number; label: string };
 
     const portfolio = await getPortfolioSummary(marketData);
 

@@ -8,6 +8,7 @@ import {
   RISK_CONFIGS,
 } from './types';
 import { logAICost } from './ai-costs';
+import { getDefiTVL } from './market-data';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -16,6 +17,7 @@ interface AnalysisContext {
   technicalIndicators: TechnicalIndicators[];
   news: NewsItem[];
   fearGreedIndex: { value: number; label: string };
+  defiTVL?: { total_tvl_usd: number; change_1d: number; top_protocols: Array<{ name: string; tvl: number; change_1d: number }> };
   currentPortfolio: {
     cash_eur: number;
     total_value_eur: number;
@@ -192,6 +194,12 @@ Prends des décisions de trading RÉFLÉCHIES pour le portefeuille suivant.
 === CONTEXTE MARCHÉ ===
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
 Taux EUR/USD: ${context.eurUsdRate} (FAVORISE les paires EUR quand disponibles)
+${context.defiTVL && context.defiTVL.total_tvl_usd > 0 ? `
+=== DONNÉES DEFI (DeFi Llama) ===
+TVL DeFi Total: $${(context.defiTVL.total_tvl_usd / 1e9).toFixed(1)}B
+Top protocoles: ${context.defiTVL.top_protocols.slice(0, 3).map(p => `${p.name}: $${(p.tvl / 1e9).toFixed(1)}B`).join(', ')}
+→ Un TVL élevé et stable = confiance dans l'écosystème DeFi → favorable aux tokens DeFi (AAVE, UNI, CRV, MKR)
+→ Un TVL en baisse = signal de méfiance sur les protocoles DeFi` : ''}
 
 === FRAIS DE PLATEFORME (CRITIQUE) ===
 Frais par transaction: 0.26% (Kraken taker)

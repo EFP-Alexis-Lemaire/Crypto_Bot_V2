@@ -138,12 +138,13 @@ export async function GET(request: Request) {
   }
 
   try {
-    const [marketData, fearGreed, eurUsd, news] = await Promise.all([
+    const [marketData, fearGreedRaw, eurUsd, news] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getFearGreedIndex(),
       getEurUsdRate(),
       getCryptoNews(),
     ]);
+    const fearGreed = fearGreedRaw as { value: number; label: string };
 
     const portfolio = await getPortfolioSummary(marketData);
     const report = await generateMorningReport(marketData, fearGreed, eurUsd, news, portfolio);

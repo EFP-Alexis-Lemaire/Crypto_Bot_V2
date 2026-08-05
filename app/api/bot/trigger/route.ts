@@ -8,6 +8,7 @@ import {
   getTrendingCoins,
   getCoinHistory,
   calculateTechnicalIndicators,
+  getDefiTVL,
   WATCHLIST_COINS,
   SYMBOL_TO_COINGECKO_ID,
 } from '@/lib/market-data';
@@ -64,12 +65,13 @@ export async function POST() {
     }
 
     // Fetch all market data
-    const [marketData, news, fearGreed, eurUsdRate, trendingCoins] = await Promise.all([
+    const [marketData, news, fearGreed, eurUsdRate, trendingCoins, defiTVL] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getCryptoNews(),
-      getFearGreedIndex(),
+      getFearGreedIndex() as Promise<{ value: number; label: string }>,
       getEurUsdRate(),
       getTrendingCoins(),
+      getDefiTVL(),
     ]);
 
     const additionalCoins = trendingCoins.filter(id => !WATCHLIST_COINS.includes(id));
@@ -134,6 +136,7 @@ export async function POST() {
       technicalIndicators,
       news,
       fearGreedIndex: fearGreed,
+      defiTVL,
       currentPortfolio: {
         cash_eur: portfolio.cash_eur,
         total_value_eur: portfolio.total_value_eur,

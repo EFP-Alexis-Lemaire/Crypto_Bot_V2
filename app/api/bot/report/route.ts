@@ -17,6 +17,7 @@ export async function POST() {
       getMarketData(WATCHLIST_COINS),
       getFearGreedIndex(),
     ]);
+    const fg = fearGreed as { value: number; label: string };
 
     const portfolio = await getPortfolioSummary(marketData);
 
@@ -41,13 +42,13 @@ export async function POST() {
     }));
 
     const marketSentiment =
-      fearGreed.value < 25 ? '🔴 Marché en peur extrême — prudence maximale' :
-      fearGreed.value < 45 ? '🟠 Marché craintif — opportunités pour les acheteurs patients' :
-      fearGreed.value < 55 ? '🟡 Marché neutre — attente de signal clair' :
-      fearGreed.value < 75 ? '🟢 Marché euphorique modéré — prendre des profits progressifs' :
+      fg.value < 25 ? '🔴 Marché en peur extrême — prudence maximale' :
+      fg.value < 45 ? '🟠 Marché craintif — opportunités pour les acheteurs patients' :
+      fg.value < 55 ? '🟡 Marché neutre — attente de signal clair' :
+      fg.value < 75 ? '🟢 Marché euphorique modéré — prendre des profits progressifs' :
       '⚠️ Marché en euphorie extrême — risque de correction élevé';
 
-    await sendDailyReport(portfolio, decisions, todayTrades.length, fearGreed, marketSentiment);
+    await sendDailyReport(portfolio, decisions, todayTrades.length, fg, marketSentiment);
 
     return NextResponse.json({ success: true, trades_today: todayTrades.length });
   } catch (error) {
