@@ -202,6 +202,14 @@ ${memoryText}
 === CONTEXTE MARCHÉ ===
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
 Taux EUR/USD: ${context.eurUsdRate} (FAVORISE les paires EUR quand disponibles)
+
+=== GESTION DU CASH (CRITIQUE) ===
+Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€
+⚠️ ADAPTE le montant de chaque BUY au cash disponible:
+- Si cash < 100€ → NE PAS proposer de BUY (insuffisant même pour les frais)
+- Si cash entre 100€ et 300€ → montant max = ${Math.floor(context.currentPortfolio.cash_eur * 0.85)}€ (85% du cash)
+- Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * (riskConfig as { max_position_size_pct: number }).max_position_size_pct / 100).toFixed(0)}€ max)
+- NE JAMAIS proposer un montant supérieur au cash disponible
 ${context.defiTVL && context.defiTVL.total_tvl_usd > 0 ? `
 === DONNÉES DEFI (DeFi Llama) ===
 TVL DeFi Total: $${(context.defiTVL.total_tvl_usd / 1e9).toFixed(1)}B

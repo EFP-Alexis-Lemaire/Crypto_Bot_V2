@@ -83,20 +83,27 @@ export async function executePaperTrade(
       `) as Row[];
       const cashEur = parseFloat(str(cashResult[0] ?? {}, 'amount'));
 
-      if (cashEur < decision.amount_eur) {
+      // If requested amount exceeds available cash, use available cash (minus 5% buffer for fees)
+      const minTrade = 50; // minimum trade size in EUR
+      const availableForTrade = cashEur * 0.95; // keep 5% buffer
+
+      if (cashEur < minTrade) {
         return {
           success: false,
-          message: `Fonds insuffisants: ${cashEur.toFixed(2)}€ disponible, ${decision.amount_eur.toFixed(2)}€ requis`,
+          message: `Fonds insuffisants: ${cashEur.toFixed(2)}€ disponible (minimum ${minTrade}€ requis)`,
         };
       }
 
-      const fee = decision.amount_eur * PLATFORM_FEE_RATE;
-      const netAmount = decision.amount_eur - fee;
+      // Adapt amount to available cash if needed
+      const actualAmount = Math.min(decision.amount_eur, availableForTrade);
+
+      const fee = actualAmount * PLATFORM_FEE_RATE;
+      const netAmount = actualAmount - fee;
       const cryptoAmount = netAmount / currentPrice.price_eur;
 
       await sql`
         UPDATE portfolio 
-        SET amount = amount - ${decision.amount_eur}, updated_at = NOW()
+        SET amount = amount - ${actualAmount}, updated_at = NOW()
         WHERE symbol = 'EUR'
       `;
 
@@ -130,14 +137,18 @@ export async function executePaperTrade(
         INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence)
         VALUES (
           ${decision.symbol}, 'BUY', ${cryptoAmount}, ${currentPrice.price_eur},
-          ${currentPrice.price_usd}, ${eurUsdRate}, ${decision.amount_eur},
+          ${currentPrice.price_usd}, ${eurUsdRate}, ${actualAmount},
           ${fee}, 'paper', ${decision.reasoning}, ${decision.confidence}
         )
       `;
 
+      const adaptedMsg = actualAmount < decision.amount_eur
+        ? ` (adapté: demandé ${decision.amount_eur.toFixed(0)}€, exécuté ${actualAmount.toFixed(0)}€)`
+        : '';
+
       return {
         success: true,
-        message: `Acheté ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€`,
+        message: `Acheté ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€${adaptedMsg}`,
       };
     }
 
