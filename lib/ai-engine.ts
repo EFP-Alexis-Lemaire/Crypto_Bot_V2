@@ -176,7 +176,7 @@ Retourne un JSON avec les symboles candidats:
 function buildDecisionPrompt(
   context: AnalysisContext,
   candidates: string[],
-  riskConfig: ReturnType<typeof Object.values>[0],
+  riskConfig: import('./types').RiskConfig,
   memoryText: string
 ): string {
   const candidateData = context.marketData.filter(m =>
@@ -208,7 +208,7 @@ Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€
 ⚠️ ADAPTE le montant de chaque BUY au cash disponible:
 - Si cash < 100€ → NE PAS proposer de BUY (insuffisant même pour les frais)
 - Si cash entre 100€ et 300€ → montant max = ${Math.floor(context.currentPortfolio.cash_eur * 0.85)}€ (85% du cash)
-- Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * (riskConfig as { max_position_size_pct: number }).max_position_size_pct / 100).toFixed(0)}€ max)
+- Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * riskConfig.max_position_size_pct / 100).toFixed(0)}€ max)
 - NE JAMAIS proposer un montant supérieur au cash disponible
 ${context.defiTVL && context.defiTVL.total_tvl_usd > 0 ? `
 === DONNÉES DEFI (DeFi Llama) ===
@@ -249,14 +249,14 @@ ${relevantNews.slice(0, 8).map(n => `[${n.sentiment.toUpperCase()}] ${n.title} (
 ${portfolioDetail}
 
 === PARAMÈTRES DE RISQUE (${context.riskLevel.toUpperCase()}) ===
-- Max position: ${(riskConfig as { max_position_size_pct: number }).max_position_size_pct}% du portefeuille total
-- Stop-loss: ${(riskConfig as { stop_loss_pct: number }).stop_loss_pct}%
-- Take-profit: ${(riskConfig as { take_profit_pct: number }).take_profit_pct}%
-- Trades restants aujourd'hui: ${(riskConfig as { max_trades_per_day: number }).max_trades_per_day - context.tradesExecutedToday}
-- Max crypto en portefeuille: ${(riskConfig as { max_portfolio_crypto_pct: number }).max_portfolio_crypto_pct}% de la valeur totale
+- Max position: ${riskConfig.max_position_size_pct}% du portefeuille total
+- Stop-loss: ${riskConfig.stop_loss_pct}%
+- Take-profit: ${riskConfig.take_profit_pct}%
+- Trades restants aujourd'hui: ${riskConfig.max_trades_per_day - context.tradesExecutedToday}
+- Max crypto en portefeuille: ${riskConfig.max_portfolio_crypto_pct}% de la valeur totale
 
 === RÈGLES IMPORTANTES ===
-1. Ne jamais investir plus de ${(riskConfig as { max_position_size_pct: number }).max_position_size_pct}% du portefeuille total sur une seule position
+1. Ne jamais investir plus de ${riskConfig.max_position_size_pct}% du portefeuille total sur une seule position
 2. Garder toujours au minimum 20% en cash (EUR)
 3. Si RSI > 75: signal de survente, prudence sur les BUY
 4. Si RSI < 25: signal de survendu, opportunité potentielle

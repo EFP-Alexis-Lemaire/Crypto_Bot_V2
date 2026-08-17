@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap } from 'lucide-react';
 
 interface Config {
@@ -70,10 +70,13 @@ export default function BotControls({ config, onConfigChange }: Props) {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
+  // Local slider state to avoid API call on every tick
+  const [localConfig, setLocalConfig] = useState<Config>(config);
+  const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const isActive = config.is_active === 'true';
+  const isActive = localConfig.is_active === 'true';
 
-  const updateConfig = async (key: string, value: string) => {
+  const updateConfig = useCallback(async (key: string, value: string) => {
     try {
       await fetch('/api/config', {
         method: 'POST',
@@ -84,10 +87,21 @@ export default function BotControls({ config, onConfigChange }: Props) {
     } catch (error) {
       console.error('Config update error:', error);
     }
-  };
+  }, [onConfigChange]);
+
+  // Debounced version for sliders — waits 600ms after last change before saving
+  const updateConfigDebounced = useCallback((key: string, value: string) => {
+    setLocalConfig(prev => ({ ...prev, [key]: value }));
+    if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
+    debounceTimers.current[key] = setTimeout(() => {
+      updateConfig(key, value);
+    }, 600);
+  }, [updateConfig]);
 
   const toggleBot = async () => {
-    await updateConfig('is_active', isActive ? 'false' : 'true');
+    const newVal = isActive ? 'false' : 'true';
+    setLocalConfig(prev => ({ ...prev, is_active: newVal }));
+    await updateConfig('is_active', newVal);
     setMessage(isActive ? '⏸ Bot mis en pause' : '▶ Bot activé');
     setTimeout(() => setMessage(''), 3000);
   };
@@ -215,11 +229,11 @@ export default function BotControls({ config, onConfigChange }: Props) {
           <div className="grid grid-cols-3 gap-2">
             {riskLevels.map(level => {
               const Icon = level.icon;
-              const isSelected = config.risk_level === level.key;
+              const isSelected = localConfig.risk_level === level.key;
               return (
                 <button
                   key={level.key}
-                  onClick={() => updateConfig('risk_level', level.key)}
+                  onClick={() => { setLocalConfig(prev => ({ ...prev, risk_level: level.key })); updateConfig('risk_level', level.key); }}
                   className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all ${
                     isSelected
                       ? level.activeClass
@@ -241,12 +255,12 @@ export default function BotControls({ config, onConfigChange }: Props) {
               key={slider.configKey}
               label={slider.label}
               configKey={slider.configKey}
-              value={parseInt(config[slider.configKey as keyof Config] ?? String(slider.min))}
+              value={parseInt(localConfig[slider.configKey as keyof Config] ?? String(slider.min))}
               min={slider.min}
               max={slider.max}
               unit={slider.unit}
               color={slider.color}
-              onChange={updateConfig}
+              onChange={updateConfigDebounced}
             />
           ))}
         </div>

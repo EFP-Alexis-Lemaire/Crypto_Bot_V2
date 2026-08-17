@@ -129,6 +129,27 @@ export async function getBotMemory(): Promise<BotMemory> {
       else if (change < -1) portfolioTrend = 'declining';
     }
 
+    // Overall win rate — based on sell trades vs their buy price
+    const sellTradesRaw = (await sql`
+      SELECT t_sell.symbol, t_sell.price_eur as sell_price, t_buy.price_eur as buy_price
+      FROM trades t_sell
+      JOIN LATERAL (
+        SELECT price_eur FROM trades
+        WHERE symbol = t_sell.symbol AND action = 'BUY'
+        AND executed_at < t_sell.executed_at
+        ORDER BY executed_at DESC LIMIT 1
+      ) t_buy ON true
+      WHERE t_sell.action = 'SELL'
+      AND t_sell.executed_at > NOW() - INTERVAL '30 days'
+    `) as Array<{ symbol: string; sell_price: string; buy_price: string }>;
+
+    const winCount = sellTradesRaw.filter(t =>
+      parseFloat(t.sell_price) > parseFloat(t.buy_price)
+    ).length;
+    const winRateOverall = sellTradesRaw.length > 0
+      ? Math.round((winCount / sellTradesRaw.length) * 100)
+      : 0;
+
     // Best/worst performers
     const sorted = [...symbolPerformance].sort((a, b) => b.estimated_pnl_eur - a.estimated_pnl_eur);
     const bestPerformer = sorted[0]?.symbol ?? 'N/A';
@@ -184,7 +205,7 @@ export async function getBotMemory(): Promise<BotMemory> {
       best_performer: bestPerformer,
       worst_performer: worstPerformer,
       total_trades_30d: totalTrades30d,
-      win_rate_overall: 0,
+      win_rate_overall: winRateOverall,
       avg_trade_size_eur: avgTradeSize,
       lessons,
     };

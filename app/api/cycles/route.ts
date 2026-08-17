@@ -6,7 +6,9 @@ export async function GET(request: Request) {
   const limit = parseInt(searchParams.get('limit') ?? '20');
 
   try {
-    // Get all unique cycles with their summary
+    type Row = Record<string, unknown>;
+
+    // Get cycle summaries
     const cycles = (await sql`
       SELECT
         cycle_id,
@@ -21,33 +23,43 @@ export async function GET(request: Request) {
       GROUP BY cycle_id
       ORDER BY started_at DESC
       LIMIT ${limit}
-    `) as Array<Record<string, unknown>>;
+    `) as Row[];
 
-    // For each cycle, get the decisions detail
-    const cyclesWithDetails = await Promise.all(
-      cycles.map(async (cycle) => {
-        const decisions = (await sql`
-          SELECT
-            symbol,
-            action,
-            reasoning,
-            confidence,
-            risk_score,
-            model_used,
-            market_data,
-            news_summary,
-            decided_at
-          FROM bot_decisions
-          WHERE cycle_id = ${cycle.cycle_id as string}
-          ORDER BY decided_at ASC
-        `) as Array<Record<string, unknown>>;
+    if (cycles.length === 0) {
+      return NextResponse.json({ cycles: [] });
+    }
 
-        return {
-          ...cycle,
-          decisions,
-        };
-      })
-    );
+    // Single query for all decisions (fix N+1)
+    const cycleIds = cycles.map(c => String(c.cycle_id));
+    const allDecisions = (await sql`
+      SELECT
+        cycle_id,
+        symbol,
+        action,
+        reasoning,
+        confidence,
+        risk_score,
+        model_used,
+        market_data,
+        news_summary,
+        decided_at
+      FROM bot_decisions
+      WHERE cycle_id = ANY(${cycleIds})
+      ORDER BY decided_at ASC
+    `) as Row[];
+
+    // Group decisions by cycle_id
+    const decisionsByCycle: Record<string, Row[]> = {};
+    allDecisions.forEach(d => {
+      const cid = String(d.cycle_id);
+      if (!decisionsByCycle[cid]) decisionsByCycle[cid] = [];
+      decisionsByCycle[cid].push(d);
+    });
+
+    const cyclesWithDetails = cycles.map(cycle => ({
+      ...cycle,
+      decisions: decisionsByCycle[String(cycle.cycle_id)] ?? [],
+    }));
 
     return NextResponse.json({ cycles: cyclesWithDetails });
   } catch (error) {

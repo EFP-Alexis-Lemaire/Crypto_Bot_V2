@@ -146,5 +146,15 @@ export async function initializeDatabase() {
     )
   `;
 
+  // Morning reports table
+  await db`
+    CREATE TABLE IF NOT EXISTS morning_reports (
+      id SERIAL PRIMARY KEY,
+      report_date DATE UNIQUE NOT NULL,
+      data JSONB NOT NULL,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+  `;
+
   console.log('Database initialized successfully');
 }

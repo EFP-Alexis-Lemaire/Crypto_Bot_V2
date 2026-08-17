@@ -198,6 +198,8 @@ export async function getDefiTVL(): Promise<{
 }
 
 export async function getFearGreedIndex(): Promise<{
+  value: number;
+  label: string;
 }> {
   try {
     const res = await axios.get('https://api.alternative.me/fng/', {
@@ -400,11 +402,14 @@ export function calculateTechnicalIndicators(
   const ema_26 = calculateEMA(prices, 26);
   const macdLine = ema_12 - ema_26;
 
-  const macdPrices = prices.map((_, i) => {
-    if (i < 25) return 0;
-    return calculateEMA(prices.slice(0, i + 1), 12) - calculateEMA(prices.slice(0, i + 1), 26);
-  });
-  const macd_signal = calculateEMA(macdPrices.slice(-9), 9);
+  // MACD: EMA12 - EMA26, signal = EMA9 of MACD line (filter out zeros)
+  const macdPrices = prices
+    .map((_, i) => {
+      if (i < 25) return null;
+      return calculateEMA(prices.slice(0, i + 1), 12) - calculateEMA(prices.slice(0, i + 1), 26);
+    })
+    .filter((v): v is number => v !== null);
+  const macd_signal = macdPrices.length >= 9 ? calculateEMA(macdPrices.slice(-9), 9) : 0;
   const macd_histogram = macdLine - macd_signal;
 
   const sma_20 = prices.length >= 20
