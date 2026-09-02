@@ -161,7 +161,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [dbContext]);
 
   useEffect(() => {
     isMounted.current = true;
@@ -171,7 +171,7 @@ export default function Dashboard() {
       isMounted.current = false;
       clearInterval(interval);
     };
-  }, [fetchAll, dbContext]);
+  }, [fetchAll]);
 
   const fearEmoji =
     fearGreed.value < 25
@@ -275,20 +275,7 @@ export default function Dashboard() {
               >PROD</button>
             </div>
 
-            {/* Live mode sync button */}
-            {config.trading_mode === 'live' && (
-              <button
-                onClick={async () => {
-                  await fetch('/api/bot/sync', { method: 'POST' });
-                  fetchAll();
-                }}
-                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-red-400 text-xs font-medium transition-all"
-                title="Sync solde depuis les exchanges"
-              >
-                <RefreshCw className="w-3 h-3" />
-                Sync exchanges
-              </button>
-            )}
+
           </div>
         </div>
 
