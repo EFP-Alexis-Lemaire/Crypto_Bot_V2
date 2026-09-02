@@ -45,10 +45,16 @@ export async function POST() {
     `) as Array<{ value: string }>;
     const riskLevel = (riskResult[0]?.value ?? 'moderate') as 'conservative' | 'moderate' | 'aggressive';
 
+    // Get trading mode early (needed for trade count filter)
+    const modeResultEarly = (await sql`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
+    const isLive = modeResultEarly[0]?.value === 'live';
+    const currentEnv = isLive ? 'live' : 'paper';
+
     const tradesTodayResult = (await sql`
       SELECT COUNT(*) as count FROM trades
       WHERE executed_at > NOW() - INTERVAL '24 hours'
       AND action IN ('BUY', 'SELL')
+      AND env = ${currentEnv}
     `) as Array<{ count: string }>;
     const tradesExecutedToday = parseInt(tradesTodayResult[0]?.count ?? '0');
 
@@ -103,10 +109,7 @@ export async function POST() {
     // Check stop-loss / take-profit
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData);
 
-    // Get trading mode
-    const modeResult = (await sql`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
-    const isLive = modeResult[0]?.value === 'live';
-
+    // Get trading mode — already read earlier, remove duplicate
     // Sync from exchange if live mode
     if (isLive) {
       await syncPortfolioFromExchange('both');
@@ -129,7 +132,9 @@ export async function POST() {
         risk_score: 10,
         timeframe: 'Immédiat',
       };
-      const result = await executePaperTrade(slDecision, marketCoin, eurUsdRate);
+      const result = isLive
+        ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
+        : await executePaperTrade(slDecision, marketCoin, eurUsdRate);
       await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message);
       await sql`
         INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators)

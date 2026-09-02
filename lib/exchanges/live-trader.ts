@@ -79,11 +79,11 @@ export async function executeLiveTrade(
       // Record in DB with live mode
       const cryptoAmount = (actualAmount - fee) / currentPrice.price_eur;
       await sql`
-        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence)
+        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (
           ${decision.symbol}, 'BUY', ${cryptoAmount}, ${currentPrice.price_eur},
           ${currentPrice.price_usd}, ${eurUsdRate}, ${actualAmount},
-          ${fee}, 'live', ${decision.reasoning}, ${decision.confidence}
+          ${fee}, 'live', ${decision.reasoning}, ${decision.confidence}, 'live'
         )
       `;
 
@@ -98,9 +98,9 @@ export async function executeLiveTrade(
     }
 
     if (decision.action === 'SELL') {
-      // Get current holding from DB
+      // Get current holding from DB — scoped to live env
       const holdingResult = (await sql`
-        SELECT * FROM portfolio WHERE symbol = ${decision.symbol}
+        SELECT * FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'
       `) as Row[];
 
       if (holdingResult.length === 0 || parseFloat(String(holdingResult[0].amount ?? 0)) <= 0) {
@@ -136,11 +136,11 @@ export async function executeLiveTrade(
 
       // Record in DB
       await sql`
-        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence)
+        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (
           ${decision.symbol}, 'SELL', ${cryptoToSell}, ${currentPrice.price_eur},
           ${currentPrice.price_usd}, ${eurUsdRate}, ${eurReceived},
-          ${fee}, 'live', ${decision.reasoning}, ${decision.confidence}
+          ${fee}, 'live', ${decision.reasoning}, ${decision.confidence}, 'live'
         )
       `;
 
@@ -194,45 +194,45 @@ export async function syncPortfolioFromExchange(
 
     if (Object.keys(balances).length === 0) return;
 
-    // Update portfolio table with real balances
+    // Update portfolio table with real balances — always scoped to env='live'
     for (const [symbol, amount] of Object.entries(balances)) {
       if (symbol === 'EUR' || symbol === 'USD') {
         await sql`
-          INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur)
-          VALUES ('EUR', 'EUR', ${amount}, 1)
-          ON CONFLICT (symbol) DO UPDATE SET amount = ${amount}, updated_at = NOW()
+          INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
+          VALUES ('EUR', 'EUR', ${amount}, 1, 'live')
+          ON CONFLICT (symbol, env) DO UPDATE SET amount = ${amount}, updated_at = NOW()
         `;
       } else {
         // For crypto, keep avg_buy_price from our records, just update amount
         const existing = (await sql`
-          SELECT avg_buy_price_eur FROM portfolio WHERE symbol = ${symbol}
+          SELECT avg_buy_price_eur FROM portfolio WHERE symbol = ${symbol} AND env = 'live'
         `) as Row[];
 
         if (existing.length > 0) {
           await sql`
             UPDATE portfolio SET amount = ${amount}, updated_at = NOW()
-            WHERE symbol = ${symbol}
+            WHERE symbol = ${symbol} AND env = 'live'
           `;
         } else if (amount > 0.000001) {
           // New holding — we don't know buy price, use 0 as placeholder
           await sql`
-            INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur)
-            VALUES ('CRYPTO', ${symbol}, ${amount}, 0)
-            ON CONFLICT (symbol) DO UPDATE SET amount = ${amount}, updated_at = NOW()
+            INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
+            VALUES ('CRYPTO', ${symbol}, ${amount}, 0, 'live')
+            ON CONFLICT (symbol, env) DO UPDATE SET amount = ${amount}, updated_at = NOW()
           `;
         }
       }
     }
 
-    // Remove positions that are no longer in exchange
+    // Remove live positions that are no longer in exchange
     const dbHoldings = (await sql`
-      SELECT symbol FROM portfolio WHERE symbol != 'EUR'
+      SELECT symbol FROM portfolio WHERE symbol != 'EUR' AND env = 'live'
     `) as Row[];
 
     for (const holding of dbHoldings) {
       const sym = String(holding.symbol);
       if (!balances[sym] || balances[sym] < 0.000001) {
-        await sql`DELETE FROM portfolio WHERE symbol = ${sym}`;
+        await sql`DELETE FROM portfolio WHERE symbol = ${sym} AND env = 'live'`;
       }
     }
 

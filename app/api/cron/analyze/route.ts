@@ -19,6 +19,7 @@ import {
   savePortfolioSnapshot,
   checkStopLossAndTakeProfit,
 } from '@/lib/portfolio';
+import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -59,11 +60,19 @@ export async function GET(request: Request) {
     `;
     const riskLevel = (firstVal(riskResult, 'value') ?? 'moderate') as 'conservative' | 'moderate' | 'aggressive';
 
-    // Count trades today
+    // Get trading mode early (needed for trade count filter and execution)
+    const modeResult = await sql`
+      SELECT value FROM bot_config WHERE key = 'trading_mode'
+    `;
+    const isLive = firstVal(modeResult, 'value') === 'live';
+    const currentEnv = isLive ? 'live' : 'paper';
+
+    // Count trades today — filtered by current env to avoid cross-contamination
     const tradesTodayResult = await sql`
       SELECT COUNT(*) as count FROM trades 
       WHERE executed_at > NOW() - INTERVAL '24 hours'
       AND action IN ('BUY', 'SELL')
+      AND env = ${currentEnv}
     `;
     const tradesExecutedToday = parseInt(firstVal(tradesTodayResult, 'count') ?? '0');
 
@@ -133,11 +142,17 @@ export async function GET(request: Request) {
     console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData);
 
+    // Sync from exchange if live mode
+    if (isLive) {
+      await syncPortfolioFromExchange('both');
+    }
+
     // Track recently sold symbols to prevent immediate rebuy
     const recentlySoldResult = (await sql`
       SELECT DISTINCT symbol FROM trades
       WHERE action = 'SELL'
       AND executed_at > NOW() - INTERVAL '4 hours'
+      AND env = ${currentEnv}
     `) as Array<{ symbol: string }>;
     const recentlySold = new Set(recentlySoldResult.map(r => r.symbol));
     
@@ -157,7 +172,9 @@ export async function GET(request: Request) {
         timeframe: 'Immédiat',
       };
 
-      const result = await executePaperTrade(slDecision, marketCoin, eurUsdRate);
+      const result = isLive
+        ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
+        : await executePaperTrade(slDecision, marketCoin, eurUsdRate);
       await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message);
 
       // Log decision
@@ -240,7 +257,9 @@ export async function GET(request: Request) {
       const marketCoin = allMarketData.find(m => m.symbol === decision.symbol);
       if (!marketCoin) continue;
 
-      const result = await executePaperTrade(decision, marketCoin, eurUsdRate);
+      const result = isLive
+        ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
+        : await executePaperTrade(decision, marketCoin, eurUsdRate);
       executedTrades.push({ decision, result });
 
       // Log decision with full market data
