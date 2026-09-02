@@ -46,30 +46,41 @@ export async function GET() {
     const signingInput = `${header}.${payload}`;
 
     // Normalize — raw base64 or PEM
-    let pemKey: string;
+    let pemKey: crypto.KeyObject | null = null;
     const normalised = apiSecret.replace(/\\n/g, '\n').trim();
+    const der = normalised.includes('-----BEGIN') ? null : Buffer.from(normalised, 'base64');
+
+    info.raw_key_bytes = der?.length ?? 'N/A (PEM)';
+    info.der_hex_preview = der ? der.slice(0, 10).toString('hex') : 'N/A';
+
+    const attempts: string[] = [];
 
     if (normalised.includes('-----BEGIN')) {
-      pemKey = normalised;
-      info.pem_type = 'PEM envelope detected';
-    } else {
-      // Raw base64 → PKCS#8 PEM
-      const rawKey = Buffer.from(normalised, 'base64');
-      info.raw_key_bytes = rawKey.length;
-      const pkcs8Prefix = Buffer.from(
-        '304102010030130607' +
-        '2a8648ce3d020106082a8648ce3d03010704270' +
-        '4253023020101042' +
-        '0',
-        'hex'
-      );
-      const der = Buffer.concat([pkcs8Prefix, rawKey]);
-      const b64 = der.toString('base64').match(/.{1,64}/g)!.join('\n');
-      pemKey = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
-      info.pem_type = 'Converted from raw base64 to PKCS#8 PEM';
+      try { pemKey = crypto.createPrivateKey(normalised); attempts.push('PEM direct: OK'); } catch (e) { attempts.push(`PEM direct: ${e}`); }
+    } else if (der) {
+      try { pemKey = crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' }); attempts.push('DER pkcs8: OK'); } catch (e) { attempts.push(`DER pkcs8: ${e}`); }
+      if (!pemKey) {
+        try { pemKey = crypto.createPrivateKey({ key: der, format: 'der', type: 'sec1' }); attempts.push('DER sec1: OK'); } catch (e) { attempts.push(`DER sec1: ${e}`); }
+      }
+      if (!pemKey) {
+        try {
+          const jwk = { kty: 'EC', crv: 'P-256', d: der.toString('base64url'), x: Buffer.alloc(32).toString('base64url'), y: Buffer.alloc(32).toString('base64url') };
+          pemKey = crypto.createPrivateKey({ key: jwk, format: 'jwk' });
+          attempts.push('JWK d=full: OK');
+        } catch (e) { attempts.push(`JWK d=full: ${e}`); }
+      }
+      if (!pemKey && der.length > 32) {
+        try {
+          const scalar = der.slice(der.length - 32);
+          const jwk = { kty: 'EC', crv: 'P-256', d: scalar.toString('base64url'), x: Buffer.alloc(32).toString('base64url'), y: Buffer.alloc(32).toString('base64url') };
+          pemKey = crypto.createPrivateKey({ key: jwk, format: 'jwk' });
+          attempts.push('JWK d=last32: OK');
+        } catch (e) { attempts.push(`JWK d=last32: ${e}`); }
+      }
     }
 
-    info.pem_preview = `${pemKey.slice(0, 60)}...`;
+    info.key_load_attempts = attempts;
+    if (!pemKey) throw new Error('Could not load private key — see key_load_attempts');
 
     const sign = crypto.createSign('SHA256');
     sign.update(signingInput);
