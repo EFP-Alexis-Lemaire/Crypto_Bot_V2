@@ -466,14 +466,14 @@ export default function Dashboard() {
             {/* Bot Controls + Cashout side by side */}
             <div className="grid lg:grid-cols-2 gap-4">
               <BotControls
-                config={config as unknown as { risk_level: string; is_active: string; trading_mode: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
+                config={config as unknown as { risk_level: string; is_active: string; trading_mode: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string; initial_portfolio_eur: string }}
                 onConfigChange={fetchAll}
                 dbContext={dbContext}
               />
               <CashoutPanel
                 portfolio={portfolio ?? { total_value_eur: 5000, cash_eur: 5000, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }}
                 trades={trades}
-                initialInvestment={5000}
+                initialInvestment={parseFloat(config.initial_portfolio_eur ?? '5000')}
                 aiCosts={aiCosts as Parameters<typeof CashoutPanel>[0]['aiCosts']}
               />
             </div>

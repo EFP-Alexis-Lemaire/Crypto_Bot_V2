@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef } from 'react';
-import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap } from 'lucide-react';
+import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro } from 'lucide-react';
 
 interface Config {
   risk_level: string;
@@ -11,6 +11,7 @@ interface Config {
   stop_loss_pct: string;
   take_profit_pct: string;
   max_position_size_pct: string;
+  initial_portfolio_eur: string;
 }
 
 interface Props {
@@ -65,46 +66,12 @@ function ConfigSlider({ label, configKey, value, min, max, unit = '', color, onC
   );
 }
 
-function EnvSwitch({ isLive, onSwitch }: { isLive: boolean; onSwitch: (mode: string) => Promise<void> }) {
-  const borderCls = isLive ? 'bg-red-500/10 border-red-500/30' : 'bg-gray-800/50 border-gray-700/50';
-  const titleCls = isLive ? 'text-red-400' : 'text-gray-300';
-  const btnCls = isLive
-    ? 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-    : 'bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/20';
-
-  return (
-    <div className={`flex items-center justify-between p-3 rounded-xl border ${borderCls}`}>
-      <div>
-        <div className={`text-sm font-semibold ${titleCls}`}>
-          {isLive ? '🔴 MODE LIVE (Argent réel)' : '📝 Mode Paper (Fictif)'}
-        </div>
-        <div className="text-gray-500 text-xs mt-0.5">
-          {isLive ? 'Trades sur Kraken/Coinbase' : 'Aucun argent réel'}
-        </div>
-      </div>
-      <button
-        onClick={async () => {
-          const next = isLive ? 'paper' : 'live';
-          if (next === 'live') {
-            const ok = window.confirm(
-              'ATTENTION\n\nPasser en LIVE va executer de vrais trades avec ton argent.\n\nConfirmer ?'
-            );
-            if (!ok) return;
-          }
-          await onSwitch(next);
-        }}
-        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${btnCls}`}
-      >
-        {isLive ? 'Paper' : 'Live'}
-      </button>
-    </div>
-  );
-}
-
 export default function BotControls({ config, onConfigChange, dbContext }: Props) {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
+  const [capitalInput, setCapitalInput] = useState('');
+  const [editingCapital, setEditingCapital] = useState(false);
   const [localConfig, setLocalConfig] = useState<Config>({
     risk_level: config.risk_level ?? 'moderate',
     is_active: config.is_active ?? 'true',
@@ -113,6 +80,7 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     stop_loss_pct: config.stop_loss_pct ?? '8',
     take_profit_pct: config.take_profit_pct ?? '15',
     max_position_size_pct: config.max_position_size_pct ?? '20',
+    initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
   });
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -189,6 +157,18 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     }
   };
 
+  const saveCapital = async () => {
+    const val = parseFloat(capitalInput);
+    if (isNaN(val) || val <= 0) return;
+    const strVal = val.toFixed(2);
+    setLocalConfig(prev => ({ ...prev, initial_portfolio_eur: strVal }));
+    await updateConfig('initial_portfolio_eur', strVal);
+    setEditingCapital(false);
+    setCapitalInput('');
+    setMessage(`Capital de référence mis à jour: ${strVal}€`);
+    setTimeout(() => setMessage(''), 4000);
+  };
+
   const riskLevels = [
     { key: 'conservative', label: 'Conservateur', icon: Shield, activeClass: 'bg-green-500/15 text-green-400 border-green-500/40' },
     { key: 'moderate',     label: 'Modere',        icon: TrendingUp, activeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
@@ -254,16 +234,45 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
           </div>
         )}
 
-        {/* Environment switch */}
-        <EnvSwitch
-          isLive={localConfig.trading_mode === 'live'}
-          onSwitch={async (nextMode) => {
-            setLocalConfig(prev => ({ ...prev, trading_mode: nextMode }));
-            await updateConfig('trading_mode', nextMode);
-            setMessage(nextMode === 'live' ? 'Mode LIVE active' : 'Mode Paper');
-            setTimeout(() => setMessage(''), 4000);
-          }}
-        />
+        {/* Capital de référence */}
+        <div className="flex items-center justify-between p-3 rounded-xl border bg-gray-800/50 border-gray-700/50">
+          <div className="flex items-center gap-2">
+            <Euro className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+            <div>
+              <div className="text-gray-300 text-sm font-semibold">Capital investi</div>
+              <div className="text-gray-500 text-xs mt-0.5">Référence pour le calcul du P&L</div>
+            </div>
+          </div>
+          {editingCapital ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="1"
+                step="any"
+                value={capitalInput}
+                onChange={e => setCapitalInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveCapital(); if (e.key === 'Escape') setEditingCapital(false); }}
+                placeholder={localConfig.initial_portfolio_eur}
+                className="w-24 bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-yellow-500"
+                autoFocus
+              />
+              <button onClick={saveCapital} className="px-2.5 py-1.5 bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 rounded-lg text-xs font-semibold hover:bg-yellow-500/30 transition-all">
+                OK
+              </button>
+              <button onClick={() => setEditingCapital(false)} className="px-2 py-1.5 text-gray-500 hover:text-gray-300 text-xs transition-all">
+                ✕
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => { setEditingCapital(true); setCapitalInput(localConfig.initial_portfolio_eur); }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs font-bold transition-all"
+            >
+              {parseFloat(localConfig.initial_portfolio_eur).toFixed(2)}€
+              <span className="text-gray-400 font-normal">Modifier</span>
+            </button>
+          )}
+        </div>
 
         {/* Risk level */}
         <div>

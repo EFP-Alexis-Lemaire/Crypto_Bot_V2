@@ -165,6 +165,13 @@ export async function initializeDatabase() {
     ON CONFLICT (key) DO NOTHING
   `;
 
+  // Ensure initial_portfolio_eur exists even on older DBs that were initialized before this key was added
+  await db`
+    INSERT INTO bot_config (key, value)
+    VALUES ('initial_portfolio_eur', '5000')
+    ON CONFLICT (key) DO NOTHING
+  `;
+
   // Initialize paper portfolio with EUR cash
   await db`
     INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)

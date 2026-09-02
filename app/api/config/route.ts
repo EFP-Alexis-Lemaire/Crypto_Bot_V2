@@ -34,6 +34,7 @@ export async function POST(request: Request) {
       'stop_loss_pct',
       'take_profit_pct',
       'is_active',
+      'initial_portfolio_eur',
     ];
 
     if (!allowedKeys.includes(key)) {

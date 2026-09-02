@@ -58,9 +58,17 @@ export async function getPortfolioSummary(
   }
 
   const total_value_eur = cash_eur + crypto_value_eur;
-  const initial = parseFloat(process.env.INITIAL_PORTFOLIO_EUR ?? '5000');
+
+  // Read initial capital from DB (context-aware), fallback to env var then 5000
+  const initialConfigRows = (await db`
+    SELECT value FROM bot_config WHERE key = 'initial_portfolio_eur'
+  `) as Row[];
+  const initial = initialConfigRows.length > 0
+    ? parseFloat(str(initialConfigRows[0], 'value'))
+    : parseFloat(process.env.INITIAL_PORTFOLIO_EUR ?? '5000');
+
   const pnl_eur = total_value_eur - initial;
-  const pnl_percent = (pnl_eur / initial) * 100;
+  const pnl_percent = initial > 0 ? (pnl_eur / initial) * 100 : 0;
 
   return {
     total_value_eur,
