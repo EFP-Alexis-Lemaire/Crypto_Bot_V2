@@ -19,6 +19,7 @@ import {
   savePortfolioSnapshot,
   checkStopLossAndTakeProfit,
 } from '@/lib/portfolio';
+import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -102,7 +103,14 @@ export async function POST() {
     // Check stop-loss / take-profit
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData);
 
-    // Track recently sold to prevent immediate rebuy
+    // Get trading mode
+    const modeResult = (await sql`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
+    const isLive = modeResult[0]?.value === 'live';
+
+    // Sync from exchange if live mode
+    if (isLive) {
+      await syncPortfolioFromExchange('both');
+    }
     const recentlySoldResult = (await sql`
       SELECT DISTINCT symbol FROM trades
       WHERE action = 'SELL'
@@ -189,7 +197,10 @@ export async function POST() {
       const marketCoin = allMarketData.find(m => m.symbol === decision.symbol);
       if (!marketCoin) continue;
 
-      const result = await executePaperTrade(decision, marketCoin, eurUsdRate);
+      // Execute paper or live trade based on mode
+      const result = isLive
+        ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
+        : await executePaperTrade(decision, marketCoin, eurUsdRate);
       if (result.success) tradesExecuted++;
 
       const techIndicator = technicalIndicators.find(t => t.symbol === decision.symbol);

@@ -6,6 +6,7 @@ import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap } from 
 interface Config {
   risk_level: string;
   is_active: string;
+  trading_mode: string;
   max_trades_per_day: string;
   stop_loss_pct: string;
   take_profit_pct: string;
@@ -30,14 +31,11 @@ interface SliderProps {
 
 function ConfigSlider({ label, configKey, value, min, max, unit = '', color, onChange }: SliderProps) {
   const pct = ((value - min) / (max - min)) * 100;
-
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-gray-400 text-xs font-medium">{label}</span>
-        <span className={`text-sm font-bold ${color}`}>
-          {value}{unit}
-        </span>
+        <span className={`text-sm font-bold ${color}`}>{value}{unit}</span>
       </div>
       <div className="relative h-1.5 bg-gray-800 rounded-full">
         <div
@@ -66,11 +64,46 @@ function ConfigSlider({ label, configKey, value, min, max, unit = '', color, onC
   );
 }
 
+function EnvSwitch({ isLive, onSwitch }: { isLive: boolean; onSwitch: (mode: string) => Promise<void> }) {
+  const borderCls = isLive ? 'bg-red-500/10 border-red-500/30' : 'bg-gray-800/50 border-gray-700/50';
+  const titleCls = isLive ? 'text-red-400' : 'text-gray-300';
+  const btnCls = isLive
+    ? 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+    : 'bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/20';
+
+  return (
+    <div className={`flex items-center justify-between p-3 rounded-xl border ${borderCls}`}>
+      <div>
+        <div className={`text-sm font-semibold ${titleCls}`}>
+          {isLive ? '🔴 MODE LIVE (Argent réel)' : '📝 Mode Paper (Fictif)'}
+        </div>
+        <div className="text-gray-500 text-xs mt-0.5">
+          {isLive ? 'Trades sur Kraken/Coinbase' : 'Aucun argent réel'}
+        </div>
+      </div>
+      <button
+        onClick={async () => {
+          const next = isLive ? 'paper' : 'live';
+          if (next === 'live') {
+            const ok = window.confirm(
+              'ATTENTION\n\nPasser en LIVE va executer de vrais trades avec ton argent.\n\nConfirmer ?'
+            );
+            if (!ok) return;
+          }
+          await onSwitch(next);
+        }}
+        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${btnCls}`}
+      >
+        {isLive ? 'Paper' : 'Live'}
+      </button>
+    </div>
+  );
+}
+
 export default function BotControls({ config, onConfigChange }: Props) {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
-  // Local slider state to avoid API call on every tick
   const [localConfig, setLocalConfig] = useState<Config>(config);
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -89,39 +122,36 @@ export default function BotControls({ config, onConfigChange }: Props) {
     }
   }, [onConfigChange]);
 
-  // Debounced version for sliders — waits 600ms after last change before saving
   const updateConfigDebounced = useCallback((key: string, value: string) => {
     setLocalConfig(prev => ({ ...prev, [key]: value }));
     if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key]);
-    debounceTimers.current[key] = setTimeout(() => {
-      updateConfig(key, value);
-    }, 600);
+    debounceTimers.current[key] = setTimeout(() => updateConfig(key, value), 600);
   }, [updateConfig]);
 
   const toggleBot = async () => {
     const newVal = isActive ? 'false' : 'true';
     setLocalConfig(prev => ({ ...prev, is_active: newVal }));
     await updateConfig('is_active', newVal);
-    setMessage(isActive ? '⏸ Bot mis en pause' : '▶ Bot activé');
+    setMessage(isActive ? 'Bot mis en pause' : 'Bot active');
     setTimeout(() => setMessage(''), 3000);
   };
 
   const triggerAnalysis = async () => {
     setRunning(true);
-    setMessage('🔍 Analyse en cours...');
+    setMessage('Analyse en cours...');
     try {
       const res = await fetch('/api/bot/trigger', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
-        setMessage(`❌ Erreur ${res.status}: ${data.error ?? 'inconnue'}`);
+        setMessage(`Erreur ${res.status}: ${data.error ?? 'inconnue'}`);
       } else {
         const trades = data.trades_executed ?? 0;
-        const decisions = (data.decisions ?? []).length;
-        setMessage(`✅ Terminé — ${trades} trade(s), ${decisions} décision(s)`);
+        const dec = (data.decisions ?? []).length;
+        setMessage(`Termine — ${trades} trade(s), ${dec} decision(s)`);
         setTimeout(() => onConfigChange(), 500);
       }
     } catch (err) {
-      setMessage(`❌ Erreur réseau: ${err}`);
+      setMessage(`Erreur reseau: ${err}`);
     } finally {
       setRunning(false);
       setTimeout(() => setMessage(''), 8000);
@@ -130,17 +160,17 @@ export default function BotControls({ config, onConfigChange }: Props) {
 
   const triggerReport = async () => {
     setLoading(true);
-    setMessage('📤 Envoi du rapport...');
+    setMessage('Envoi du rapport...');
     try {
       const res = await fetch('/api/bot/report', { method: 'POST' });
-      const data = await res.json();
       if (!res.ok) {
-        setMessage(`❌ Erreur ${res.status}: ${data.error ?? 'inconnue'}`);
+        const data = await res.json();
+        setMessage(`Erreur: ${data.error ?? 'inconnue'}`);
       } else {
-        setMessage('✅ Rapport Telegram envoyé');
+        setMessage('Rapport Telegram envoye');
       }
     } catch {
-      setMessage('❌ Erreur Telegram');
+      setMessage('Erreur Telegram');
     } finally {
       setLoading(false);
       setTimeout(() => setMessage(''), 4000);
@@ -148,16 +178,16 @@ export default function BotControls({ config, onConfigChange }: Props) {
   };
 
   const riskLevels = [
-    { key: 'conservative', label: 'Conservateur', icon: Shield, activeClass: 'bg-green-500/15 text-green-400 border-green-500/40 shadow-green-500/10 shadow-lg' },
-    { key: 'moderate', label: 'Modéré', icon: TrendingUp, activeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/40 shadow-blue-500/10 shadow-lg' },
-    { key: 'aggressive', label: 'Agressif', icon: Zap, activeClass: 'bg-orange-500/15 text-orange-400 border-orange-500/40 shadow-orange-500/10 shadow-lg' },
+    { key: 'conservative', label: 'Conservateur', icon: Shield, activeClass: 'bg-green-500/15 text-green-400 border-green-500/40' },
+    { key: 'moderate',     label: 'Modere',        icon: TrendingUp, activeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
+    { key: 'aggressive',   label: 'Agressif',      icon: Zap,        activeClass: 'bg-orange-500/15 text-orange-400 border-orange-500/40' },
   ];
 
   const sliders = [
-    { label: 'Max trades / jour', configKey: 'max_trades_per_day', min: 1, max: 10, unit: '', color: 'text-blue-400' },
-    { label: 'Stop-loss', configKey: 'stop_loss_pct', min: 3, max: 20, unit: '%', color: 'text-red-400' },
-    { label: 'Take-profit', configKey: 'take_profit_pct', min: 5, max: 50, unit: '%', color: 'text-green-400' },
-    { label: 'Taille max position', configKey: 'max_position_size_pct', min: 5, max: 40, unit: '%', color: 'text-purple-400' },
+    { label: 'Max trades/jour',  configKey: 'max_trades_per_day',    min: 1, max: 10, unit: '',  color: 'text-blue-400' },
+    { label: 'Stop-loss',        configKey: 'stop_loss_pct',          min: 3, max: 20, unit: '%', color: 'text-red-400' },
+    { label: 'Take-profit',      configKey: 'take_profit_pct',        min: 5, max: 50, unit: '%', color: 'text-green-400' },
+    { label: 'Max position',     configKey: 'max_position_size_pct',  min: 5, max: 40, unit: '%', color: 'text-purple-400' },
   ];
 
   return (
@@ -168,13 +198,9 @@ export default function BotControls({ config, onConfigChange }: Props) {
           <div className="p-1.5 bg-gray-800 rounded-lg">
             <Settings className="w-4 h-4 text-gray-400" />
           </div>
-          <span className="text-white font-semibold text-sm">Contrôles du Bot</span>
+          <span className="text-white font-semibold text-sm">Controles du Bot</span>
         </div>
-        <div className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border transition-all ${
-          isActive
-            ? 'bg-green-500/10 text-green-400 border-green-500/30'
-            : 'bg-gray-800 text-gray-500 border-gray-700'
-        }`}>
+        <div className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border ${isActive ? 'bg-green-500/10 text-green-400 border-green-500/30' : 'bg-gray-800 text-gray-500 border-gray-700'}`}>
           <div className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
           {isActive ? 'Actif' : 'En pause'}
         </div>
@@ -185,22 +211,15 @@ export default function BotControls({ config, onConfigChange }: Props) {
         <div className="grid grid-cols-3 gap-2.5">
           <button
             onClick={toggleBot}
-            className={`group flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-semibold border transition-all ${
-              isActive
-                ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border-red-500/20 hover:border-red-500/40'
-                : 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border-green-500/20 hover:border-green-500/40'
-            }`}
+            className={`flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-semibold border transition-all ${isActive ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border-red-500/20' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border-green-500/20'}`}
           >
-            {isActive
-              ? <><Pause className="w-4 h-4" /> Pause</>
-              : <><Play className="w-4 h-4" /> Activer</>
-            }
+            {isActive ? <><Pause className="w-4 h-4" /> Pause</> : <><Play className="w-4 h-4" /> Activer</>}
           </button>
 
           <button
             onClick={triggerAnalysis}
             disabled={running}
-            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-semibold bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/20 hover:border-blue-500/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-semibold bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/20 disabled:opacity-40 transition-all"
           >
             <RefreshCw className={`w-4 h-4 ${running ? 'animate-spin' : ''}`} />
             Analyser
@@ -209,19 +228,30 @@ export default function BotControls({ config, onConfigChange }: Props) {
           <button
             onClick={triggerReport}
             disabled={loading}
-            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-semibold bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 border border-purple-500/20 hover:border-purple-500/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl text-sm font-semibold bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 border border-purple-500/20 disabled:opacity-40 transition-all"
           >
             <Send className="w-4 h-4" />
             Rapport
           </button>
         </div>
 
-        {/* Feedback message */}
+        {/* Feedback */}
         {message && (
           <div className="text-sm text-center py-2.5 px-4 bg-gray-800/80 border border-gray-700/50 rounded-xl text-gray-300">
             {message}
           </div>
         )}
+
+        {/* Environment switch */}
+        <EnvSwitch
+          isLive={localConfig.trading_mode === 'live'}
+          onSwitch={async (nextMode) => {
+            setLocalConfig(prev => ({ ...prev, trading_mode: nextMode }));
+            await updateConfig('trading_mode', nextMode);
+            setMessage(nextMode === 'live' ? 'Mode LIVE active' : 'Mode Paper');
+            setTimeout(() => setMessage(''), 4000);
+          }}
+        />
 
         {/* Risk level */}
         <div>
@@ -233,12 +263,11 @@ export default function BotControls({ config, onConfigChange }: Props) {
               return (
                 <button
                   key={level.key}
-                  onClick={() => { setLocalConfig(prev => ({ ...prev, risk_level: level.key })); updateConfig('risk_level', level.key); }}
-                  className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all ${
-                    isSelected
-                      ? level.activeClass
-                      : 'bg-gray-800/50 text-gray-500 border-gray-700/50 hover:border-gray-600 hover:text-gray-400'
-                  }`}
+                  onClick={() => {
+                    setLocalConfig(prev => ({ ...prev, risk_level: level.key }));
+                    updateConfig('risk_level', level.key);
+                  }}
+                  className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-semibold border transition-all ${isSelected ? level.activeClass : 'bg-gray-800/50 text-gray-500 border-gray-700/50 hover:border-gray-600'}`}
                 >
                   <Icon className="w-3.5 h-3.5" />
                   {level.label}

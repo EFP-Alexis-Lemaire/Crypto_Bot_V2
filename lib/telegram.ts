@@ -11,10 +11,14 @@ export async function sendTelegramMessage(message: string): Promise<void> {
     return;
   }
 
+  const isLive = process.env.TRADING_MODE === 'live';
+  // Prefix all paper trading messages so they're clearly identifiable
+  const finalMessage = isLive ? message : `🧪 <b>[UAT/PAPER]</b>\n${message}`;
+
   try {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: message,
+      text: finalMessage,
       parse_mode: 'HTML',
     });
   } catch (error) {
@@ -92,7 +96,7 @@ ${holdingsText}
 ${decisionsText}
 
 ━━━━━━━━━━━━━━━━━━━━
-Mode: 📝 PAPER TRADING (Fictif)
+Mode: ${process.env.TRADING_MODE === 'live' ? '🔴 LIVE TRADING (Réel)' : '📝 PAPER TRADING (Fictif)'}
 ⏰ Prochain rapport: 18h00
   `.trim();
 

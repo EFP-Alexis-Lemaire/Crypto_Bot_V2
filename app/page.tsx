@@ -258,6 +258,21 @@ export default function Dashboard() {
             >
               <RefreshCw className="w-4 h-4" />
             </button>
+
+            {/* Live mode sync button */}
+            {config.trading_mode === 'live' && (
+              <button
+                onClick={async () => {
+                  await fetch('/api/bot/sync', { method: 'POST' });
+                  fetchAll();
+                }}
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-red-400 text-xs font-medium transition-all"
+                title="Sync solde depuis les exchanges"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Sync exchanges
+              </button>
+            )}
           </div>
         </div>
 
@@ -448,7 +463,7 @@ export default function Dashboard() {
             {/* Bot Controls + Cashout side by side */}
             <div className="grid lg:grid-cols-2 gap-4">
               <BotControls
-                config={config as unknown as { risk_level: string; is_active: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
+                config={config as unknown as { risk_level: string; is_active: string; trading_mode: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
                 onConfigChange={fetchAll}
               />
               <CashoutPanel
