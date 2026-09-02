@@ -225,7 +225,9 @@ export default function Dashboard() {
             <div>
               <h1 className="text-white font-bold text-sm">CryptoBot AI</h1>
               <p className="text-gray-500 text-xs">
-                Mode: <span className="text-yellow-400 font-medium">PAPER TRADING</span>
+                Mode: <span className={`font-medium ${config.trading_mode === 'live' ? 'text-red-400' : 'text-yellow-400'}`}>
+                  {config.trading_mode === 'live' ? 'LIVE TRADING' : 'PAPER TRADING'}
+                </span>
                 {' · '}
                 <span className={config.is_active === 'true' ? 'text-green-400' : 'text-gray-500'}>
                   {config.is_active === 'true' ? '● Actif' : '○ En pause'}
