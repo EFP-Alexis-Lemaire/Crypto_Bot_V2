@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sqlForContext, getDbContext } from '@/lib/db';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const result = (await sql`
+    const ctx = getDbContext(request);
+    const db = sqlForContext(ctx);
+
+    const result = (await db`
       SELECT data, created_at FROM morning_reports
       ORDER BY report_date DESC
       LIMIT 1
@@ -16,6 +19,7 @@ export async function GET() {
     return NextResponse.json({
       report: result[0].data,
       created_at: result[0].created_at,
+      ctx,
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

@@ -1,11 +1,14 @@
 import { NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sqlForContext, getDbContext, DbContext } from '@/lib/db';
 import { getTotalAICosts } from '@/lib/ai-costs';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    // Ensure table exists
-    await sql`
+    const ctx = getDbContext(request);
+    const db = sqlForContext(ctx);
+
+    // Ensure table exists in the correct DB
+    await db`
       CREATE TABLE IF NOT EXISTS ai_costs (
         id SERIAL PRIMARY KEY,
         cycle_id VARCHAR(50),
@@ -20,8 +23,8 @@ export async function GET() {
       )
     `;
 
-    const costs = await getTotalAICosts();
-    return NextResponse.json({ costs });
+    const costs = await getTotalAICosts(ctx);
+    return NextResponse.json({ costs, ctx });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

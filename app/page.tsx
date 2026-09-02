@@ -108,8 +108,8 @@ export default function Dashboard() {
           fetch('/api/market'),
           fetch('/api/config', { headers: dbHeaders }),
           fetch('/api/cycles?limit=30', { headers: dbHeaders }),
-          fetch('/api/morning-report'),
-          fetch('/api/ai-costs'),
+          fetch('/api/morning-report', { headers: dbHeaders }),
+          fetch('/api/ai-costs', { headers: dbHeaders }),
         ]);
 
       if (portfolioRes.ok) {

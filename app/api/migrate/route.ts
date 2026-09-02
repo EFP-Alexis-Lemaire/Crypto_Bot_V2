@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sqlForContext, getDbContext } from '@/lib/db';
 
 /**
  * Safe migration — adds missing columns and backfills NULL env values.
- * ALTER TABLE and UPDATE are in separate try/catch so the UPDATE
- * always runs even if the column already existed.
+ * Supports X-DB-Context header to run on UAT or PROD database.
+ * Call /api/migrate with header X-DB-Context: prod to migrate the prod DB.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  const ctx = getDbContext(request);
+  const sql = sqlForContext(ctx);
   try {
     const migrations: string[] = [];
 

@@ -1,4 +1,4 @@
-import { sql } from './db';
+import { sql, sqlForContext, DbContext } from './db';
 
 // OpenAI pricing (USD per 1M tokens) — updated 2024
 const PRICING: Record<string, { input: number; output: number }> = {
@@ -43,7 +43,7 @@ export async function logAICost(
   }
 }
 
-export async function getTotalAICosts(): Promise<{
+export async function getTotalAICosts(ctx: DbContext = 'uat'): Promise<{
   total_usd: number;
   total_eur: number;
   total_tokens: number;
@@ -52,7 +52,9 @@ export async function getTotalAICosts(): Promise<{
   last_30_days_usd: number;
 }> {
   try {
-    const totals = (await sql`
+    const db = sqlForContext(ctx);
+
+    const totals = (await db`
       SELECT
         COUNT(*) as calls_count,
         SUM(total_tokens) as total_tokens,
@@ -61,7 +63,7 @@ export async function getTotalAICosts(): Promise<{
       FROM ai_costs
     `) as Array<Record<string, unknown>>;
 
-    const byModel = (await sql`
+    const byModel = (await db`
       SELECT
         model,
         COUNT(*) as calls,
@@ -73,7 +75,7 @@ export async function getTotalAICosts(): Promise<{
       ORDER BY cost_usd DESC
     `) as Array<Record<string, unknown>>;
 
-    const last30 = (await sql`
+    const last30 = (await db`
       SELECT SUM(cost_usd) as total_usd
       FROM ai_costs
       WHERE created_at > NOW() - INTERVAL '30 days'
