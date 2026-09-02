@@ -5,20 +5,13 @@ let _sql: ReturnType<typeof neon> | null = null;
 
 function getSQL() {
   if (!_sql) {
-    // Pick the right database based on deployment environment:
-    //   APP_ENV=production  → DATABASE_URL_PROD  (prod Neon branch — vierge)
-    //   APP_ENV=preview/uat → DATABASE_URL        (UAT Neon branch — données existantes)
-    // Both env vars must be set in Vercel per-environment settings.
-    // VERCEL_ENV is injected automatically by Vercel: 'production' | 'preview' | 'development'
-    // No manual APP_ENV needed.
-    const isProd = (process.env.VERCEL_ENV ?? process.env.APP_ENV) === 'production';
-    const url = isProd
-      ? (process.env.DATABASE_URL_PROD ?? process.env.DATABASE_URL)
-      : process.env.DATABASE_URL;
+    // Single database for all environments.
+    // Paper vs live data is separated by the 'env' column in each table.
+    const url = process.env.DATABASE_URL;
 
     if (!url || url === 'your_neon_database_url_here') {
       throw new Error(
-        `${isProd ? 'DATABASE_URL_PROD' : 'DATABASE_URL'} is not configured. Please add it to your environment variables.`
+        'DATABASE_URL is not configured. Please add it to your environment variables.'
       );
     }
     _sql = neon(url);
