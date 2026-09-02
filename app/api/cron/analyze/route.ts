@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sqlForContext } from '@/lib/db';
 import {
   getMarketData,
   getCryptoNews,
@@ -43,11 +43,13 @@ export async function GET(request: Request) {
   }
 
   const cycleId = uuidv4();
+  // Cron always runs on UAT DB — prod is for live trading triggered manually
+  const db = sqlForContext('uat');
   console.log(`[Bot Cycle ${cycleId}] Starting analysis...`);
 
   try {
     // Check if bot is active
-    const configResult = await sql`
+    const configResult = await db`
       SELECT value FROM bot_config WHERE key = 'is_active'
     `;
     if (firstVal(configResult, 'value') === 'false') {
@@ -55,20 +57,20 @@ export async function GET(request: Request) {
     }
 
     // Get risk level
-    const riskResult = await sql`
+    const riskResult = await db`
       SELECT value FROM bot_config WHERE key = 'risk_level'
     `;
     const riskLevel = (firstVal(riskResult, 'value') ?? 'moderate') as 'conservative' | 'moderate' | 'aggressive';
 
     // Get trading mode early (needed for trade count filter and execution)
-    const modeResult = await sql`
+    const modeResult = await db`
       SELECT value FROM bot_config WHERE key = 'trading_mode'
     `;
     const isLive = firstVal(modeResult, 'value') === 'live';
     const currentEnv = isLive ? 'live' : 'paper';
 
     // Count trades today — filtered by current env to avoid cross-contamination
-    const tradesTodayResult = await sql`
+    const tradesTodayResult = await db`
       SELECT COUNT(*) as count FROM trades 
       WHERE executed_at > NOW() - INTERVAL '24 hours'
       AND action IN ('BUY', 'SELL')
@@ -76,7 +78,7 @@ export async function GET(request: Request) {
     `;
     const tradesExecutedToday = parseInt(firstVal(tradesTodayResult, 'count') ?? '0');
 
-    const maxTradesResult = await sql`
+    const maxTradesResult = await db`
       SELECT value FROM bot_config WHERE key = 'max_trades_per_day'
     `;
     const maxTrades = parseInt(firstVal(maxTradesResult, 'value') ?? '5');
@@ -148,7 +150,7 @@ export async function GET(request: Request) {
     }
 
     // Track recently sold symbols to prevent immediate rebuy
-    const recentlySoldResult = (await sql`
+    const recentlySoldResult = (await db`
       SELECT DISTINCT symbol FROM trades
       WHERE action = 'SELL'
       AND executed_at > NOW() - INTERVAL '4 hours'
@@ -178,7 +180,7 @@ export async function GET(request: Request) {
       await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message);
 
       // Log decision
-      await sql`
+      await db`
         INSERT INTO bot_decisions 
           (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators)
         VALUES (
@@ -215,7 +217,7 @@ export async function GET(request: Request) {
 
     // Always log the cycle, even if no decisions
     if (decisions.length === 0) {
-      await sql`
+      await db`
         INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
         VALUES (
           ${cycleId}, NULL, 'SKIP',
@@ -232,7 +234,7 @@ export async function GET(request: Request) {
       // Block immediate rebuy of recently sold symbols
       if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
         console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — sold within last 4h`);
-        await sql`
+        await db`
           INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
           VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
             ${'Rachat bloqué: ' + decision.symbol + ' a été vendu dans les 4 dernières heures. Délai de cooldown respecté.'},
@@ -242,7 +244,7 @@ export async function GET(request: Request) {
       }
       if (decision.action === 'HOLD' || decision.action === 'SKIP') {
         // Log but don't execute
-        await sql`
+        await db`
           INSERT INTO bot_decisions 
             (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
           VALUES (
@@ -272,7 +274,7 @@ export async function GET(request: Request) {
         )
         .slice(0, 3);
 
-      await sql`
+      await db`
         INSERT INTO bot_decisions 
           (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, news_summary)
         VALUES (
@@ -324,3 +326,4 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   return GET(request);
 }
+

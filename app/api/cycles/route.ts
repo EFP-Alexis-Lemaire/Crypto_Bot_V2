@@ -1,15 +1,18 @@
 import { NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sqlForContext, getDbContext } from '@/lib/db';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const limit = parseInt(searchParams.get('limit') ?? '20');
+  const ctx = getDbContext(request);
+  const db = sqlForContext(ctx);
 
   try {
     type Row = Record<string, unknown>;
+    const configResult = (await db`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
+    const env = (configResult[0]?.value ?? 'paper') as string;
 
-    // Get cycle summaries
-    const cycles = (await sql`
+    const cycles = (await db`
       SELECT
         cycle_id,
         MIN(decided_at) AS started_at,
@@ -20,35 +23,23 @@ export async function GET(request: Request) {
         COUNT(CASE WHEN action = 'SKIP' THEN 1 END) AS skips,
         MAX(model_used) AS model_used
       FROM bot_decisions
+      WHERE env = ${env}
       GROUP BY cycle_id
       ORDER BY started_at DESC
       LIMIT ${limit}
     `) as Row[];
 
-    if (cycles.length === 0) {
-      return NextResponse.json({ cycles: [] });
-    }
+    if (cycles.length === 0) return NextResponse.json({ cycles: [], env, ctx });
 
-    // Single query for all decisions (fix N+1)
     const cycleIds = cycles.map(c => String(c.cycle_id));
-    const allDecisions = (await sql`
-      SELECT
-        cycle_id,
-        symbol,
-        action,
-        reasoning,
-        confidence,
-        risk_score,
-        model_used,
-        market_data,
-        news_summary,
-        decided_at
+    const allDecisions = (await db`
+      SELECT cycle_id, symbol, action, reasoning, confidence, risk_score,
+             model_used, market_data, news_summary, decided_at
       FROM bot_decisions
-      WHERE cycle_id = ANY(${cycleIds})
+      WHERE cycle_id = ANY(${cycleIds}) AND env = ${env}
       ORDER BY decided_at ASC
     `) as Row[];
 
-    // Group decisions by cycle_id
     const decisionsByCycle: Record<string, Row[]> = {};
     allDecisions.forEach(d => {
       const cid = String(d.cycle_id);
@@ -61,7 +52,7 @@ export async function GET(request: Request) {
       decisions: decisionsByCycle[String(cycle.cycle_id)] ?? [],
     }));
 
-    return NextResponse.json({ cycles: cyclesWithDetails });
+    return NextResponse.json({ cycles: cyclesWithDetails, env, ctx });
   } catch (error) {
     return NextResponse.json(
       { error: 'Failed to fetch cycles', details: String(error) },

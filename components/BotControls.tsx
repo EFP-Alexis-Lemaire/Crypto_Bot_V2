@@ -16,6 +16,7 @@ interface Config {
 interface Props {
   config: Config;
   onConfigChange: () => void;
+  dbContext: 'uat' | 'prod';
 }
 
 interface SliderProps {
@@ -100,7 +101,7 @@ function EnvSwitch({ isLive, onSwitch }: { isLive: boolean; onSwitch: (mode: str
   );
 }
 
-export default function BotControls({ config, onConfigChange }: Props) {
+export default function BotControls({ config, onConfigChange, dbContext }: Props) {
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
@@ -121,14 +122,14 @@ export default function BotControls({ config, onConfigChange }: Props) {
     try {
       await fetch('/api/config', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-db-context': dbContext },
         body: JSON.stringify({ key, value }),
       });
       onConfigChange();
     } catch (error) {
       console.error('Config update error:', error);
     }
-  }, [onConfigChange]);
+  }, [onConfigChange, dbContext]);
 
   const updateConfigDebounced = useCallback((key: string, value: string) => {
     setLocalConfig(prev => ({ ...prev, [key]: value }));
@@ -148,7 +149,10 @@ export default function BotControls({ config, onConfigChange }: Props) {
     setRunning(true);
     setMessage('Analyse en cours...');
     try {
-      const res = await fetch('/api/bot/trigger', { method: 'POST' });
+      const res = await fetch('/api/bot/trigger', {
+        method: 'POST',
+        headers: { 'x-db-context': dbContext },
+      });
       const data = await res.json();
       if (!res.ok) {
         setMessage(`Erreur ${res.status}: ${data.error ?? 'inconnue'}`);

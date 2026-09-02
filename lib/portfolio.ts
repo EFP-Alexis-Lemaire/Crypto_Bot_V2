@@ -1,5 +1,6 @@
-import { sql } from './db';
+import { sql, sqlForContext, DbContext } from './db';
 import { PortfolioSummary, PortfolioHolding, BotDecision, MarketData } from './types';
+import { getCurrentEnv, TradingEnv } from './env';
 
 type Row = Record<string, unknown>;
 
@@ -7,15 +8,24 @@ function str(row: Row, field: string, fallback = '0'): string {
   return String(row[field] ?? fallback);
 }
 
+const PLATFORM_FEE_RATE = 0.0026; // 0.26% Kraken taker
+
+// Helper: get the right sql function for a given ctx
+function dbFor(ctx?: DbContext) {
+  return ctx ? sqlForContext(ctx) : sql;
+}
+
 export async function getPortfolioSummary(
-  marketData: MarketData[]
+  marketData: MarketData[],
+  envOverride?: TradingEnv,
+  ctx?: DbContext
 ): Promise<PortfolioSummary> {
-  const holdings = (await sql`SELECT * FROM portfolio`) as Row[];
+  const db = dbFor(ctx);
+  const env = envOverride ?? await getCurrentEnv();
+  const holdings = (await db`SELECT * FROM portfolio WHERE env = ${env}`) as Row[];
 
   const priceMap: Record<string, number> = {};
-  marketData.forEach(m => {
-    priceMap[m.symbol] = m.price_eur;
-  });
+  marketData.forEach(m => { priceMap[m.symbol] = m.price_eur; });
 
   let cash_eur = 0;
   let crypto_value_eur = 0;
@@ -26,7 +36,6 @@ export async function getPortfolioSummary(
       cash_eur = parseFloat(str(holding, 'amount'));
       continue;
     }
-
     const symbol = String(holding.symbol ?? '');
     const currentPrice = priceMap[symbol] ?? 0;
     const amount = parseFloat(str(holding, 'amount'));
@@ -35,9 +44,7 @@ export async function getPortfolioSummary(
     const costBasis = amount * avgBuyPrice;
     const pnl = currentValue - costBasis;
     const pnlPercent = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
-
     crypto_value_eur += currentValue;
-
     holdingDetails.push({
       symbol,
       name: marketData.find(m => m.symbol === symbol)?.name ?? symbol,
@@ -65,146 +72,141 @@ export async function getPortfolioSummary(
   };
 }
 
-// Platform fees (realistic simulation)
-// Kraken: ~0.26% taker | Coinbase Advanced: ~0.60% taker
-// We use Kraken rates as default (better fees)
-// Aller-retour total: ~0.52% (buy + sell)
-const PLATFORM_FEE_RATE = 0.0026; // 0.26% per transaction (Kraken taker)
+export async function ensurePortfolioExists(env: TradingEnv, ctx?: DbContext): Promise<void> {
+  const db = dbFor(ctx);
+  const existing = (await db`
+    SELECT id FROM portfolio WHERE symbol = 'EUR' AND env = ${env}
+  `) as Row[];
+
+  if (existing.length === 0) {
+    const initialAmount = parseFloat(process.env.INITIAL_PORTFOLIO_EUR ?? '5000');
+    await db`
+      INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
+      VALUES ('EUR', 'EUR', ${initialAmount}, 1, ${env})
+    `;
+  }
+}
 
 export async function executePaperTrade(
   decision: BotDecision,
   currentPrice: MarketData,
-  eurUsdRate: number
+  eurUsdRate: number,
+  envOverride?: TradingEnv,
+  ctx?: DbContext
 ): Promise<{ success: boolean; message: string }> {
+  const db = dbFor(ctx);
+  const env = envOverride ?? await getCurrentEnv();
+
   try {
     if (decision.action === 'BUY') {
-      const cashResult = (await sql`
-        SELECT amount FROM portfolio WHERE symbol = 'EUR'
+      const cashResult = (await db`
+        SELECT amount FROM portfolio WHERE symbol = 'EUR' AND env = ${env}
       `) as Row[];
       const cashEur = parseFloat(str(cashResult[0] ?? {}, 'amount'));
 
-      // If requested amount exceeds available cash, use available cash (minus 5% buffer for fees)
-      const minTrade = 50; // minimum trade size in EUR
-      const availableForTrade = cashEur * 0.95; // keep 5% buffer
+      const minTrade = 50;
+      const availableForTrade = cashEur * 0.95;
 
       if (cashEur < minTrade) {
         return {
           success: false,
-          message: `Fonds insuffisants: ${cashEur.toFixed(2)}€ disponible (minimum ${minTrade}€ requis)`,
+          message: `Fonds insuffisants: ${cashEur.toFixed(2)}€ (minimum ${minTrade}€)`,
         };
       }
 
-      // Adapt amount to available cash if needed
       const actualAmount = Math.min(decision.amount_eur, availableForTrade);
-
       const fee = actualAmount * PLATFORM_FEE_RATE;
-      const netAmount = actualAmount - fee;
-      const cryptoAmount = netAmount / currentPrice.price_eur;
+      const cryptoAmount = (actualAmount - fee) / currentPrice.price_eur;
 
-      await sql`
-        UPDATE portfolio 
-        SET amount = amount - ${actualAmount}, updated_at = NOW()
-        WHERE symbol = 'EUR'
+      await db`
+        UPDATE portfolio SET amount = amount - ${actualAmount}, updated_at = NOW()
+        WHERE symbol = 'EUR' AND env = ${env}
       `;
 
-      const existing = (await sql`
-        SELECT * FROM portfolio WHERE symbol = ${decision.symbol}
+      const existing = (await db`
+        SELECT * FROM portfolio WHERE symbol = ${decision.symbol} AND env = ${env}
       `) as Row[];
 
       if (existing.length > 0) {
         const existingAmount = parseFloat(str(existing[0], 'amount'));
         const existingAvg = parseFloat(str(existing[0], 'avg_buy_price_eur'));
-        const newTotalAmount = existingAmount + cryptoAmount;
-        const newAvgPrice =
-          (existingAmount * existingAvg + cryptoAmount * currentPrice.price_eur) /
-          newTotalAmount;
-
-        await sql`
-          UPDATE portfolio 
-          SET amount = ${newTotalAmount}, 
-              avg_buy_price_eur = ${newAvgPrice},
-              updated_at = NOW()
-          WHERE symbol = ${decision.symbol}
+        const newTotal = existingAmount + cryptoAmount;
+        const newAvg = (existingAmount * existingAvg + cryptoAmount * currentPrice.price_eur) / newTotal;
+        await db`
+          UPDATE portfolio SET amount = ${newTotal}, avg_buy_price_eur = ${newAvg}, updated_at = NOW()
+          WHERE symbol = ${decision.symbol} AND env = ${env}
         `;
       } else {
-        await sql`
-          INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur)
-          VALUES ('CRYPTO', ${decision.symbol}, ${cryptoAmount}, ${currentPrice.price_eur})
+        await db`
+          INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
+          VALUES ('CRYPTO', ${decision.symbol}, ${cryptoAmount}, ${currentPrice.price_eur}, ${env})
         `;
       }
 
-      await sql`
-        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence)
+      await db`
+        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (
           ${decision.symbol}, 'BUY', ${cryptoAmount}, ${currentPrice.price_eur},
           ${currentPrice.price_usd}, ${eurUsdRate}, ${actualAmount},
-          ${fee}, 'paper', ${decision.reasoning}, ${decision.confidence}
+          ${fee}, ${env}, ${decision.reasoning}, ${decision.confidence}, ${env}
         )
       `;
 
-      const adaptedMsg = actualAmount < decision.amount_eur
-        ? ` (adapté: demandé ${decision.amount_eur.toFixed(0)}€, exécuté ${actualAmount.toFixed(0)}€)`
-        : '';
-
+      const adapted = actualAmount < decision.amount_eur
+        ? ` (adapte: ${actualAmount.toFixed(0)}€)` : '';
       return {
         success: true,
-        message: `Acheté ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€${adaptedMsg}`,
+        message: `Achat ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€${adapted}`,
       };
     }
 
     if (decision.action === 'SELL') {
-      const holdingResult = (await sql`
-        SELECT * FROM portfolio WHERE symbol = ${decision.symbol}
+      const holdingResult = (await db`
+        SELECT * FROM portfolio WHERE symbol = ${decision.symbol} AND env = ${env}
       `) as Row[];
 
       if (holdingResult.length === 0 || parseFloat(str(holdingResult[0], 'amount')) <= 0) {
-        return {
-          success: false,
-          message: `Aucune position ${decision.symbol} à vendre`,
-        };
+        return { success: false, message: `Aucune position ${decision.symbol}` };
       }
 
       const holding = holdingResult[0];
-      const currentHoldingValue =
-        parseFloat(str(holding, 'amount')) * currentPrice.price_eur;
-      const sellValue = Math.min(decision.amount_eur, currentHoldingValue);
+      const holdingValue = parseFloat(str(holding, 'amount')) * currentPrice.price_eur;
+      const sellValue = Math.min(decision.amount_eur, holdingValue);
       const cryptoToSell = sellValue / currentPrice.price_eur;
       const fee = sellValue * PLATFORM_FEE_RATE;
       const eurReceived = sellValue - fee;
 
       const newAmount = parseFloat(str(holding, 'amount')) - cryptoToSell;
       if (newAmount <= 0.000001) {
-        await sql`DELETE FROM portfolio WHERE symbol = ${decision.symbol}`;
+        await db`DELETE FROM portfolio WHERE symbol = ${decision.symbol} AND env = ${env}`;
       } else {
-        await sql`
-          UPDATE portfolio 
-          SET amount = ${newAmount}, updated_at = NOW()
-          WHERE symbol = ${decision.symbol}
+        await db`
+          UPDATE portfolio SET amount = ${newAmount}, updated_at = NOW()
+          WHERE symbol = ${decision.symbol} AND env = ${env}
         `;
       }
 
-      await sql`
-        UPDATE portfolio 
-        SET amount = amount + ${eurReceived}, updated_at = NOW()
-        WHERE symbol = 'EUR'
+      await db`
+        UPDATE portfolio SET amount = amount + ${eurReceived}, updated_at = NOW()
+        WHERE symbol = 'EUR' AND env = ${env}
       `;
 
-      await sql`
-        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence)
+      await db`
+        INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (
           ${decision.symbol}, 'SELL', ${cryptoToSell}, ${currentPrice.price_eur},
           ${currentPrice.price_usd}, ${eurUsdRate}, ${eurReceived},
-          ${fee}, 'paper', ${decision.reasoning}, ${decision.confidence}
+          ${fee}, ${env}, ${decision.reasoning}, ${decision.confidence}, ${env}
         )
       `;
 
       return {
         success: true,
-        message: `Vendu ${cryptoToSell.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€, reçu ${eurReceived.toFixed(2)}€`,
+        message: `Vente ${cryptoToSell.toFixed(6)} ${decision.symbol} → ${eurReceived.toFixed(2)}€`,
       };
     }
 
-    return { success: true, message: `Action ${decision.action} sur ${decision.symbol} - pas d'exécution requise` };
+    return { success: true, message: `${decision.action} ${decision.symbol}` };
   } catch (error) {
     console.error('Trade execution error:', error);
     return { success: false, message: `Erreur: ${error}` };
@@ -212,39 +214,38 @@ export async function executePaperTrade(
 }
 
 export async function savePortfolioSnapshot(
-  portfolio: PortfolioSummary
+  portfolio: PortfolioSummary,
+  envOverride?: TradingEnv,
+  ctx?: DbContext
 ): Promise<void> {
-  await sql`
-    INSERT INTO portfolio_snapshots 
-      (total_value_eur, cash_eur, crypto_value_eur, pnl_eur, pnl_percent, holdings)
+  const db = dbFor(ctx);
+  const env = envOverride ?? await getCurrentEnv();
+  await db`
+    INSERT INTO portfolio_snapshots (total_value_eur, cash_eur, crypto_value_eur, pnl_eur, pnl_percent, holdings, env)
     VALUES (
-      ${portfolio.total_value_eur},
-      ${portfolio.cash_eur},
-      ${portfolio.crypto_value_eur},
-      ${portfolio.pnl_eur},
-      ${portfolio.pnl_percent},
-      ${JSON.stringify(portfolio.holdings)}
+      ${portfolio.total_value_eur}, ${portfolio.cash_eur}, ${portfolio.crypto_value_eur},
+      ${portfolio.pnl_eur}, ${portfolio.pnl_percent}, ${JSON.stringify(portfolio.holdings)}, ${env}
     )
   `;
 }
 
 export async function checkStopLossAndTakeProfit(
-  marketData: MarketData[]
+  marketData: MarketData[],
+  envOverride?: TradingEnv,
+  ctx?: DbContext
 ): Promise<{ symbol: string; action: 'SELL'; reason: string }[]> {
-  // Simple holdings query (no complex join with invalid SQL)
-  const holdings = (await sql`
-    SELECT * FROM portfolio WHERE symbol != 'EUR'
+  const db = dbFor(ctx);
+  const env = envOverride ?? await getCurrentEnv();
+  const holdings = (await db`
+    SELECT * FROM portfolio WHERE symbol != 'EUR' AND env = ${env}
   `) as Row[];
 
-  const configRows = (await sql`SELECT * FROM bot_config`) as Row[];
+  const configRows = (await db`SELECT * FROM bot_config`) as Row[];
   const configMap: Record<string, string> = {};
-  configRows.forEach((c) => {
-    configMap[String(c.key ?? '')] = String(c.value ?? '');
-  });
+  configRows.forEach(c => { configMap[String(c.key ?? '')] = String(c.value ?? ''); });
 
   const stopLossPct = parseFloat(configMap.stop_loss_pct ?? '8');
   const takeProfitPct = parseFloat(configMap.take_profit_pct ?? '15');
-
   const actions: { symbol: string; action: 'SELL'; reason: string }[] = [];
 
   for (const holding of holdings) {
@@ -253,23 +254,13 @@ export async function checkStopLossAndTakeProfit(
     if (!market) continue;
 
     const avgBuyPrice = parseFloat(str(holding, 'avg_buy_price_eur'));
-    const currentPrice = market.price_eur;
-    const changeFromBuy = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100;
+    const change = ((market.price_eur - avgBuyPrice) / avgBuyPrice) * 100;
 
-    if (changeFromBuy <= -stopLossPct) {
-      actions.push({
-        symbol,
-        action: 'SELL',
-        reason: `Stop-loss déclenché: ${changeFromBuy.toFixed(2)}% depuis l'achat à ${avgBuyPrice.toFixed(4)}€`,
-      });
-    } else if (changeFromBuy >= takeProfitPct) {
-      actions.push({
-        symbol,
-        action: 'SELL',
-        reason: `Take-profit déclenché: +${changeFromBuy.toFixed(2)}% depuis l'achat à ${avgBuyPrice.toFixed(4)}€`,
-      });
+    if (change <= -stopLossPct) {
+      actions.push({ symbol, action: 'SELL', reason: `Stop-loss: ${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€` });
+    } else if (change >= takeProfitPct) {
+      actions.push({ symbol, action: 'SELL', reason: `Take-profit: +${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€` });
     }
   }
-
   return actions;
 }

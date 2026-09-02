@@ -94,18 +94,20 @@ export default function Dashboard() {
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [morningReport, setMorningReport] = useState<Record<string, unknown> | null>(null);
   const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
+  const [dbContext, setDbContext] = useState<'uat' | 'prod'>('uat');
   const isMounted = useRef(false);
 
   const fetchAll = useCallback(async () => {
+    const dbHeaders = { 'x-db-context': dbContext };
     try {
       const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes] =
         await Promise.all([
-          fetch('/api/portfolio'),
-          fetch('/api/decisions?limit=20'),
-          fetch('/api/trades?limit=30'),
+          fetch('/api/portfolio', { headers: dbHeaders }),
+          fetch('/api/decisions?limit=20', { headers: dbHeaders }),
+          fetch('/api/trades?limit=30', { headers: dbHeaders }),
           fetch('/api/market'),
-          fetch('/api/config'),
-          fetch('/api/cycles?limit=30'),
+          fetch('/api/config', { headers: dbHeaders }),
+          fetch('/api/cycles?limit=30', { headers: dbHeaders }),
           fetch('/api/morning-report'),
           fetch('/api/ai-costs'),
         ]);
@@ -169,7 +171,7 @@ export default function Dashboard() {
       isMounted.current = false;
       clearInterval(interval);
     };
-  }, [fetchAll]);
+  }, [fetchAll, dbContext]);
 
   const fearEmoji =
     fearGreed.value < 25
@@ -260,6 +262,18 @@ export default function Dashboard() {
             >
               <RefreshCw className="w-4 h-4" />
             </button>
+
+            {/* UAT / PROD DB toggle */}
+            <div className="flex items-center bg-gray-800 rounded-lg p-1 gap-1">
+              <button
+                onClick={() => setDbContext('uat')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold transition-all ${dbContext === 'uat' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+              >UAT</button>
+              <button
+                onClick={() => setDbContext('prod')}
+                className={`px-2.5 py-1 rounded text-xs font-semibold transition-all ${dbContext === 'prod' ? 'bg-red-500 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+              >PROD</button>
+            </div>
 
             {/* Live mode sync button */}
             {config.trading_mode === 'live' && (
@@ -467,6 +481,7 @@ export default function Dashboard() {
               <BotControls
                 config={config as unknown as { risk_level: string; is_active: string; trading_mode: string; max_trades_per_day: string; stop_loss_pct: string; take_profit_pct: string; max_position_size_pct: string }}
                 onConfigChange={fetchAll}
+                dbContext={dbContext}
               />
               <CashoutPanel
                 portfolio={portfolio ?? { total_value_eur: 5000, cash_eur: 5000, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }}

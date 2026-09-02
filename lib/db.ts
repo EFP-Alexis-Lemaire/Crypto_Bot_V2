@@ -1,28 +1,51 @@
 import { neon } from '@neondatabase/serverless';
 
-// Lazy initialization to avoid build-time errors when DATABASE_URL is not set
-let _sql: ReturnType<typeof neon> | null = null;
+export type DbContext = 'uat' | 'prod';
 
-function getSQL() {
-  if (!_sql) {
-    // Single database for all environments.
-    // Paper vs live data is separated by the 'env' column in each table.
-    const url = process.env.DATABASE_URL;
+// Two separate neon instances — one per DB
+let _sqlUat: ReturnType<typeof neon> | null = null;
+let _sqlProd: ReturnType<typeof neon> | null = null;
 
-    if (!url || url === 'your_neon_database_url_here') {
-      throw new Error(
-        'DATABASE_URL is not configured. Please add it to your environment variables.'
-      );
+function getSQLForContext(ctx: DbContext): ReturnType<typeof neon> {
+  if (ctx === 'prod') {
+    if (!_sqlProd) {
+      const url = process.env.DATABASE_URL_PROD;
+      if (!url || url === 'your_prod_neon_database_url_here') {
+        throw new Error('DATABASE_URL_PROD is not configured.');
+      }
+      _sqlProd = neon(url);
     }
-    _sql = neon(url);
+    return _sqlProd;
+  } else {
+    if (!_sqlUat) {
+      const url = process.env.DATABASE_URL;
+      if (!url) throw new Error('DATABASE_URL is not configured.');
+      _sqlUat = neon(url);
+    }
+    return _sqlUat;
   }
-  return _sql;
+}
+
+// Default SQL uses UAT — override with getSqlForContext when needed
+function getSQL() {
+  return getSQLForContext('uat');
 }
 
 // Typed query result row
 export type Row = Record<string, unknown>;
 
-// Typed query helper - returns typed rows
+// Query helper for a specific DB context
+export async function queryCtx<T extends Row = Row>(
+  ctx: DbContext,
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+): Promise<T[]> {
+  const db = getSQLForContext(ctx);
+  const result = await db(strings, ...values);
+  return result as unknown as T[];
+}
+
+// Default query helper (uses UAT DB) — kept for backward compat
 export async function query<T extends Row = Row>(
   strings: TemplateStringsArray,
   ...values: unknown[]
@@ -32,9 +55,21 @@ export async function query<T extends Row = Row>(
   return result as unknown as T[];
 }
 
-// Keep sql as a template tag for compatibility
+// Default sql tag (UAT) — kept for backward compat
 export const sql = (strings: TemplateStringsArray, ...values: unknown[]) =>
   query(strings, ...values);
+
+// Context-aware sql builder — use this in API routes
+export function sqlForContext(ctx: DbContext) {
+  return (strings: TemplateStringsArray, ...values: unknown[]) =>
+    queryCtx(ctx, strings, ...values);
+}
+
+// Parse DB context from request headers — defaults to 'uat'
+export function getDbContext(request: Request): DbContext {
+  const header = request.headers.get('x-db-context');
+  return header === 'prod' ? 'prod' : 'uat';
+}
 
 export async function initializeDatabase() {
   const db = getSQL();
