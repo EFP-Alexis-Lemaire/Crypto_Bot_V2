@@ -10,7 +10,7 @@ export async function GET() {
     // Show last 10 chars only to identify which DB is used without exposing credentials
     DATABASE_URL_tail: process.env.DATABASE_URL?.slice(-30) ?? '(not set)',
     DATABASE_URL_PROD_tail: process.env.DATABASE_URL_PROD?.slice(-30) ?? '(not set)',
-    db_in_use: process.env.APP_ENV === 'production'
+    db_in_use: (process.env.VERCEL_ENV ?? process.env.APP_ENV) === 'production'
       ? (process.env.DATABASE_URL_PROD ? 'DATABASE_URL_PROD' : 'DATABASE_URL (fallback)')
       : 'DATABASE_URL',
   });

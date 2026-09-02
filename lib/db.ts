@@ -9,7 +9,9 @@ function getSQL() {
     //   APP_ENV=production  → DATABASE_URL_PROD  (prod Neon branch — vierge)
     //   APP_ENV=preview/uat → DATABASE_URL        (UAT Neon branch — données existantes)
     // Both env vars must be set in Vercel per-environment settings.
-    const isProd = process.env.APP_ENV === 'production';
+    // VERCEL_ENV is injected automatically by Vercel: 'production' | 'preview' | 'development'
+    // No manual APP_ENV needed.
+    const isProd = (process.env.VERCEL_ENV ?? process.env.APP_ENV) === 'production';
     const url = isProd
       ? (process.env.DATABASE_URL_PROD ?? process.env.DATABASE_URL)
       : process.env.DATABASE_URL;
