@@ -5,10 +5,18 @@ let _sql: ReturnType<typeof neon> | null = null;
 
 function getSQL() {
   if (!_sql) {
-    const url = process.env.DATABASE_URL;
+    // Pick the right database based on deployment environment:
+    //   APP_ENV=production  → DATABASE_URL      (prod Neon branch)
+    //   APP_ENV=preview/uat → DATABASE_URL_UAT  (UAT Neon branch)
+    // Both env vars must be set in Vercel per-environment settings.
+    const isProd = process.env.APP_ENV === 'production';
+    const url = isProd
+      ? process.env.DATABASE_URL
+      : (process.env.DATABASE_URL_UAT ?? process.env.DATABASE_URL);
+
     if (!url || url === 'your_neon_database_url_here') {
       throw new Error(
-        'DATABASE_URL is not configured. Please add it to your .env.local file.'
+        `DATABASE_URL${isProd ? '' : '_UAT'} is not configured. Please add it to your environment variables.`
       );
     }
     _sql = neon(url);

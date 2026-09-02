@@ -3,24 +3,11 @@ import { sql } from './db';
 export type TradingEnv = 'paper' | 'live';
 
 /**
- * Returns the current trading environment.
- *
- * Priority order:
- *   1. TRADING_MODE env var (set per-environment in Vercel: prod=live, UAT=paper)
- *   2. bot_config DB key 'trading_mode' (fallback for runtime toggle)
- *   3. Default: 'paper'
- *
- * This ensures prod and UAT deployments never share the same env
- * even when they point to the same database.
+ * Returns the current trading environment from DB config.
+ * Each deployment (prod/UAT) has its own database, so this value
+ * is independent per environment and toggleable from the dashboard.
  */
 export async function getCurrentEnv(): Promise<TradingEnv> {
-  // 1. Check process env var first — set this in Vercel per deployment
-  const envVar = process.env.TRADING_MODE;
-  if (envVar === 'live' || envVar === 'paper') {
-    return envVar;
-  }
-
-  // 2. Fall back to DB config (runtime toggle from dashboard)
   try {
     const result = (await sql`
       SELECT value FROM bot_config WHERE key = 'trading_mode'
