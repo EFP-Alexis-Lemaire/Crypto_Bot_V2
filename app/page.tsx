@@ -19,6 +19,7 @@ import BotControls from '@/components/BotControls';
 import CycleHistory from '@/components/CycleHistory';
 import CashoutPanel from '@/components/CashoutPanel';
 import MorningReport from '@/components/MorningReport';
+import ExchangeBalances from '@/components/ExchangeBalances';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
 interface Snapshot {
@@ -462,6 +463,9 @@ export default function Dashboard() {
                 </div>
               </div>
             )}
+
+            {/* Exchange balances — PROD only */}
+            {dbContext === 'prod' && <ExchangeBalances />}
 
             {/* Bot Controls + Cashout side by side */}
             <div className="grid lg:grid-cols-2 gap-4">
