@@ -54,6 +54,7 @@ export async function initializeDatabase() {
       symbol VARCHAR(20) NOT NULL,
       amount DECIMAL(20, 8) NOT NULL DEFAULT 0,
       avg_buy_price_eur DECIMAL(20, 8) NOT NULL DEFAULT 0,
+      env VARCHAR(10) NOT NULL DEFAULT 'paper',
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
   `;
@@ -73,6 +74,7 @@ export async function initializeDatabase() {
       mode VARCHAR(10) NOT NULL DEFAULT 'paper',
       reasoning TEXT,
       confidence INTEGER,
+      env VARCHAR(10) NOT NULL DEFAULT 'paper',
       executed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
   `;
@@ -91,6 +93,7 @@ export async function initializeDatabase() {
       confidence INTEGER,
       risk_score INTEGER,
       model_used VARCHAR(50),
+      env VARCHAR(10) NOT NULL DEFAULT 'paper',
       decided_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
   `;
@@ -105,6 +108,7 @@ export async function initializeDatabase() {
       pnl_eur DECIMAL(20, 8) NOT NULL,
       pnl_percent DECIMAL(10, 4) NOT NULL,
       holdings JSONB,
+      env VARCHAR(10) NOT NULL DEFAULT 'paper',
       snapshotted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
   `;
@@ -135,8 +139,8 @@ export async function initializeDatabase() {
 
   // Initialize paper portfolio with EUR cash
   await db`
-    INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur)
-    VALUES ('EUR', 'EUR', 5000, 1)
+    INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
+    VALUES ('EUR', 'EUR', 5000, 1, 'paper')
     ON CONFLICT DO NOTHING
   `;
 
