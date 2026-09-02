@@ -20,7 +20,11 @@ function buildCDPJWT(apiKey: string, method: string, path: string, secret: strin
   const uri = `${method.toUpperCase()} api.coinbase.com${path}`;
 
   // Header JWT
-  const header = Buffer.from(JSON.stringify({ alg: 'ES256', kid: apiKey, nonce: crypto.randomBytes(16).toString('hex') })).toString('base64url');
+  const header = Buffer.from(JSON.stringify({
+    alg: 'ES256',
+    kid: apiKey,
+    nonce: crypto.randomBytes(16).toString('hex'),
+  })).toString('base64url');
 
   // Payload JWT
   const now = Math.floor(Date.now() / 1000);
@@ -34,8 +38,41 @@ function buildCDPJWT(apiKey: string, method: string, path: string, secret: strin
 
   const signingInput = `${header}.${payload}`;
 
-  // La clé privée peut avoir les retours à la ligne encodés en \n littéraux dans l'env var
-  const pemKey = secret.replace(/\\n/g, '\n');
+  // Coinbase CDP gives the secret as raw base64 (no PEM envelope)
+  // We need to wrap it in a proper EC private key PEM before signing
+  let pemKey: string;
+
+  const normalised = secret.replace(/\\n/g, '\n').trim();
+
+  if (normalised.includes('-----BEGIN')) {
+    // Already a proper PEM — use as-is
+    pemKey = normalised;
+  } else {
+    // Raw base64 → wrap in PKCS#8 EC private key PEM envelope
+    // Coinbase CDP secrets are 32-byte EC private keys (secp256r1 / P-256)
+    // We need to build a DER-encoded ECPrivateKey and wrap it
+    const rawKey = Buffer.from(normalised, 'base64');
+
+    // PKCS#8 DER prefix for EC P-256 (secp256r1):
+    // 30 41 — SEQUENCE
+    //   02 01 00 — version = 0
+    //   30 13 — SEQUENCE (AlgorithmIdentifier)
+    //     06 07 2a 86 48 ce 3d 02 01 — OID ecPublicKey
+    //     06 08 2a 86 48 ce 3d 03 01 07 — OID P-256 (secp256r1)
+    //   04 27 — OCTET STRING
+    //     30 25 02 01 01 04 20 — ECPrivateKey SEQUENCE + version + OCTET STRING (32 bytes)
+    //     [32 bytes private key]
+    const pkcs8Prefix = Buffer.from(
+      '304102010030130607' +
+      '2a8648ce3d020106082a8648ce3d03010704270' +
+      '4253023020101042' +
+      '0',
+      'hex'
+    );
+    const der = Buffer.concat([pkcs8Prefix, rawKey]);
+    const b64 = der.toString('base64').match(/.{1,64}/g)!.join('\n');
+    pemKey = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
+  }
 
   const sign = crypto.createSign('SHA256');
   sign.update(signingInput);

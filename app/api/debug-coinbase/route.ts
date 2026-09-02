@@ -45,11 +45,31 @@ export async function GET() {
 
     const signingInput = `${header}.${payload}`;
 
-    // Normalize PEM — replace literal \n with real newlines
-    const pemKey = apiSecret.replace(/\\n/g, '\n');
+    // Normalize — raw base64 or PEM
+    let pemKey: string;
+    const normalised = apiSecret.replace(/\\n/g, '\n').trim();
 
-    info.pem_preview = `${pemKey.slice(0, 40)}...`;
-    info.pem_has_header = pemKey.includes('-----BEGIN');
+    if (normalised.includes('-----BEGIN')) {
+      pemKey = normalised;
+      info.pem_type = 'PEM envelope detected';
+    } else {
+      // Raw base64 → PKCS#8 PEM
+      const rawKey = Buffer.from(normalised, 'base64');
+      info.raw_key_bytes = rawKey.length;
+      const pkcs8Prefix = Buffer.from(
+        '304102010030130607' +
+        '2a8648ce3d020106082a8648ce3d03010704270' +
+        '4253023020101042' +
+        '0',
+        'hex'
+      );
+      const der = Buffer.concat([pkcs8Prefix, rawKey]);
+      const b64 = der.toString('base64').match(/.{1,64}/g)!.join('\n');
+      pemKey = `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
+      info.pem_type = 'Converted from raw base64 to PKCS#8 PEM';
+    }
+
+    info.pem_preview = `${pemKey.slice(0, 60)}...`;
 
     const sign = crypto.createSign('SHA256');
     sign.update(signingInput);
