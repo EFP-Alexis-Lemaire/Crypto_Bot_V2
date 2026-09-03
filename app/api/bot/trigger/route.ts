@@ -132,6 +132,23 @@ export async function POST(request: Request) {
       const marketCoin = allMarketData.find(m => m.symbol === decision.symbol);
       if (!marketCoin) continue;
 
+      // Hard cap: never attempt a BUY with more than available cash
+      if (decision.action === 'BUY') {
+        const cashEur = portfolio.cash_eur;
+        if (cashEur < 5) {
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Cash insuffisant (${cashEur.toFixed(2)}€ < 5€ minimum). Trade annulé.`},
+              0, 0, 'cash-guard', ${currentEnv})`;
+          continue;
+        }
+        // Cap amount to 80% of available cash
+        const maxAllowed = parseFloat((cashEur * 0.80).toFixed(2));
+        if (decision.amount_eur > maxAllowed) {
+          decision.amount_eur = maxAllowed;
+        }
+      }
+
       const result = isLive
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
         : await executePaperTrade(decision, marketCoin, eurUsdRate, undefined, ctx);
