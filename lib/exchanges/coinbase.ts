@@ -82,17 +82,38 @@ export interface CoinbaseAccount {
   name: string;
   currency: string;
   available_balance: { value: string; currency: string };
+  hold: { value: string; currency: string };
 }
 
 export async function getCoinbaseBalance(): Promise<Record<string, number>> {
-  const result = await coinbaseRequest<{ accounts: CoinbaseAccount[] }>('GET', '/accounts');
   const balances: Record<string, number> = {};
-  for (const account of result.accounts ?? []) {
-    const amount = parseFloat(account.available_balance.value);
-    if (amount > 0) {
-      balances[account.currency] = amount;
+  let cursor: string | undefined;
+
+  // Paginate through all accounts (max 250 per page)
+  do {
+    const path = cursor
+      ? `/accounts?limit=250&cursor=${encodeURIComponent(cursor)}`
+      : '/accounts?limit=250';
+
+    const result = await coinbaseRequest<{
+      accounts: CoinbaseAccount[];
+      has_next: boolean;
+      cursor: string;
+    }>('GET', path);
+
+    for (const account of result.accounts ?? []) {
+      // available_balance = liquid, hold = staked/reserved — add both
+      const available = parseFloat(account.available_balance?.value ?? '0');
+      const held = parseFloat(account.hold?.value ?? '0');
+      const total = available + held;
+      if (total > 0.000000001) {
+        balances[account.currency] = (balances[account.currency] ?? 0) + total;
+      }
     }
-  }
+
+    cursor = result.has_next ? result.cursor : undefined;
+  } while (cursor);
+
   return balances;
 }
 

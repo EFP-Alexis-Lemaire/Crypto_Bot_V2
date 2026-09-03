@@ -2,13 +2,7 @@ import { NextResponse } from 'next/server';
 import { getKrakenBalance } from '@/lib/exchanges/kraken';
 import { getCoinbaseBalance } from '@/lib/exchanges/coinbase';
 import { getMarketData } from '@/lib/market-data';
-
-// Symbols we can price — extend if needed
-const PRICEABLE_SYMBOLS = [
-  'BTC', 'ETH', 'SOL', 'ADA', 'DOT', 'AVAX', 'LINK', 'UNI',
-  'AAVE', 'LTC', 'XRP', 'MATIC', 'ARB', 'OP', 'NEAR', 'ALGO',
-  'TON', 'INJ', 'SUI', 'APT', 'SEI', 'TIA',
-];
+import axios from 'axios';
 
 const COINGECKO_IDS: Record<string, string> = {
   BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', ADA: 'cardano',
@@ -17,6 +11,18 @@ const COINGECKO_IDS: Record<string, string> = {
   ARB: 'arbitrum', OP: 'optimism', NEAR: 'near', ALGO: 'algorand',
   TON: 'the-open-network', INJ: 'injective-protocol', SUI: 'sui',
   APT: 'aptos', SEI: 'sei-network', TIA: 'celestia',
+  // Coinbase specific
+  ATOM: 'cosmos', XTZ: 'tezos', XCN: 'chain-2',
+  DOGE: 'dogecoin', SHIB: 'shiba-inu', CRO: 'crypto-com-chain',
+  FIL: 'filecoin', ICP: 'internet-computer', VET: 'vechain',
+  ETC: 'ethereum-classic', MANA: 'decentraland', SAND: 'the-sandbox',
+  GRT: 'the-graph', ENJ: 'enjincoin', BAT: 'basic-attention-token',
+  ZEC: 'zcash', DASH: 'dash', EOS: 'eos', XLM: 'stellar',
+  COMP: 'compound-governance-token', SNX: 'havven', MKR: 'maker',
+  YFI: 'yearn-finance', SUSHI: 'sushi', CRV: 'curve-dao-token',
+  '1INCH': '1inch', BAL: 'balancer', REN: 'republic-protocol',
+  SKL: 'skale', NMR: 'numeraire', OXT: 'orchid-protocol',
+  STORJ: 'storj', ANKR: 'ankr', CTSI: 'cartesi',
 };
 
 export interface ExchangeBalance {
@@ -85,24 +91,36 @@ export async function GET() {
     merged[sym].sources.add('coinbase');
   }
 
-  // Fetch prices for all crypto symbols we hold
-  const cryptoSymbols = Object.keys(merged).filter(s => s !== 'EUR' && s !== 'USD' && s !== 'USDC' && s !== 'USDT');
-  const coingeckoIds = cryptoSymbols
-    .filter(s => COINGECKO_IDS[s])
-    .map(s => COINGECKO_IDS[s]);
+  // Fetch prices — known symbols via getMarketData, unknowns via CoinGecko simple/price
+  const cryptoSymbols = Object.keys(merged).filter(s => !['EUR','USD','USDC','USDT'].includes(s));
+  const knownIds = cryptoSymbols.filter(s => COINGECKO_IDS[s]).map(s => COINGECKO_IDS[s]);
+  const unknownSymbols = cryptoSymbols.filter(s => !COINGECKO_IDS[s]);
 
   let priceMap: Record<string, number> = {};
 
-  if (coingeckoIds.length > 0) {
+  // Fetch known symbols
+  if (knownIds.length > 0) {
     try {
-      const marketData = await getMarketData(coingeckoIds);
-      // Build symbol → price map
+      const marketData = await getMarketData(knownIds);
       for (const md of marketData) {
         priceMap[md.symbol] = md.price_eur;
       }
-    } catch {
-      // Price fetch failed — show balances without EUR values
-    }
+    } catch { /* silent */ }
+  }
+
+  // Fetch unknown symbols by ticker via CoinGecko simple/price
+  if (unknownSymbols.length > 0) {
+    try {
+      const ids = unknownSymbols.map(s => s.toLowerCase()).join(',');
+      const res = await axios.get(
+        `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=eur`,
+        { timeout: 8000 }
+      );
+      for (const [id, prices] of Object.entries(res.data as Record<string, { eur: number }>)) {
+        const sym = unknownSymbols.find(s => s.toLowerCase() === id);
+        if (sym) priceMap[sym] = prices.eur;
+      }
+    } catch { /* silent */ }
   }
 
   // Build final balances list
