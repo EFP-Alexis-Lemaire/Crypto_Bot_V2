@@ -20,6 +20,9 @@ export async function GET() {
   }
 
   try {
+    info.key_id_from_env = apiKey;
+    info.key_id_last_segment = apiKey.split('/').pop() ?? 'N/A';
+
     const { generateJwt } = await import('@coinbase/cdp-sdk/auth');
 
     const fullPath = '/api/v3/brokerage/accounts';

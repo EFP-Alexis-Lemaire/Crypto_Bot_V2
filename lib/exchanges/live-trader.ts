@@ -1,4 +1,4 @@
-import { sql } from '../db';
+import { sqlForContext } from '../db';
 import { BotDecision, MarketData } from '../types';
 import {
   placeKrakenOrder,
@@ -13,7 +13,9 @@ import {
 
 type Row = Record<string, unknown>;
 
-// Which exchange to use — prefer Kraken (lower fees)
+// Live trader always writes to PROD DB
+const db = sqlForContext('prod');
+
 function getPreferredExchange(symbol: string): 'kraken' | 'coinbase' | null {
   if (SYMBOL_TO_KRAKEN_PAIR[symbol]) return 'kraken';
   if (SYMBOL_TO_COINBASE_PRODUCT[symbol]) return 'coinbase';
@@ -28,57 +30,40 @@ export async function executeLiveTrade(
   const exchange = getPreferredExchange(decision.symbol);
 
   if (!exchange) {
-    return {
-      success: false,
-      message: `${decision.symbol} non disponible sur Kraken ou Coinbase`,
-    };
+    return { success: false, message: `${decision.symbol} non disponible sur Kraken ou Coinbase` };
   }
 
   const PLATFORM_FEE_RATE = exchange === 'kraken' ? 0.0026 : 0.006;
 
   try {
     if (decision.action === 'BUY') {
-      // Verify live balance before buying
       const liveBalance = exchange === 'kraken'
         ? await getKrakenBalance()
         : await getCoinbaseBalance();
 
       const cashEur = liveBalance['EUR'] ?? 0;
-      const minTrade = 10; // exchanges have ~€10 minimum
+      const minTrade = 10;
 
       if (cashEur < minTrade) {
-        return {
-          success: false,
-          message: `Solde insuffisant sur ${exchange}: ${cashEur.toFixed(2)}€`,
-        };
+        return { success: false, message: `Solde insuffisant sur ${exchange}: ${cashEur.toFixed(2)}€` };
       }
 
       const actualAmount = Math.min(decision.amount_eur, cashEur * 0.95);
       const fee = actualAmount * PLATFORM_FEE_RATE;
-
       let txid: string | undefined;
 
       if (exchange === 'kraken') {
         const pair = SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
-        const result = await placeKrakenOrder(
-          pair,
-          'buy',
-          ((actualAmount - fee) / currentPrice.price_eur).toFixed(8)
-        );
+        const result = await placeKrakenOrder(pair, 'buy', ((actualAmount - fee) / currentPrice.price_eur).toFixed(8));
         txid = result.txid[0];
       } else {
         const productId = SYMBOL_TO_COINBASE_PRODUCT[decision.symbol];
-        const result = await placeCoinbaseOrder(
-          productId,
-          'BUY',
-          actualAmount.toFixed(2)
-        );
+        const result = await placeCoinbaseOrder(productId, 'BUY', actualAmount.toFixed(2));
         txid = result.order_id;
       }
 
-      // Record in DB with live mode
       const cryptoAmount = (actualAmount - fee) / currentPrice.price_eur;
-      await sql`
+      await db`
         INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (
           ${decision.symbol}, 'BUY', ${cryptoAmount}, ${currentPrice.price_eur},
@@ -87,7 +72,6 @@ export async function executeLiveTrade(
         )
       `;
 
-      // Sync portfolio from exchange
       await syncPortfolioFromExchange(exchange);
 
       return {
@@ -98,16 +82,12 @@ export async function executeLiveTrade(
     }
 
     if (decision.action === 'SELL') {
-      // Get current holding from DB — scoped to live env
-      const holdingResult = (await sql`
+      const holdingResult = (await db`
         SELECT * FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'
       `) as Row[];
 
       if (holdingResult.length === 0 || parseFloat(String(holdingResult[0].amount ?? 0)) <= 0) {
-        return {
-          success: false,
-          message: `Aucune position ${decision.symbol} à vendre`,
-        };
+        return { success: false, message: `Aucune position ${decision.symbol} à vendre` };
       }
 
       const holding = holdingResult[0];
@@ -116,7 +96,6 @@ export async function executeLiveTrade(
       const cryptoToSell = sellValue / currentPrice.price_eur;
       const fee = sellValue * PLATFORM_FEE_RATE;
       const eurReceived = sellValue - fee;
-
       let txid: string | undefined;
 
       if (exchange === 'kraken') {
@@ -125,17 +104,11 @@ export async function executeLiveTrade(
         txid = result.txid[0];
       } else {
         const productId = SYMBOL_TO_COINBASE_PRODUCT[decision.symbol];
-        const result = await placeCoinbaseOrder(
-          productId,
-          'SELL',
-          undefined,
-          cryptoToSell.toFixed(8)
-        );
+        const result = await placeCoinbaseOrder(productId, 'SELL', undefined, cryptoToSell.toFixed(8));
         txid = result.order_id;
       }
 
-      // Record in DB
-      await sql`
+      await db`
         INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (
           ${decision.symbol}, 'SELL', ${cryptoToSell}, ${currentPrice.price_eur},
@@ -144,7 +117,6 @@ export async function executeLiveTrade(
         )
       `;
 
-      // Sync portfolio from exchange
       await syncPortfolioFromExchange(exchange);
 
       return {
@@ -157,17 +129,10 @@ export async function executeLiveTrade(
     return { success: true, message: `Action ${decision.action} — pas d'exécution` };
   } catch (error) {
     console.error(`[LiveTrader] Error on ${exchange}:`, error);
-    return {
-      success: false,
-      message: `Erreur ${exchange}: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    return { success: false, message: `Erreur ${exchange}: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
-/**
- * Sync portfolio DB from live exchange balances
- * Called after each live trade to keep data accurate
- */
 export async function syncPortfolioFromExchange(
   exchange: 'kraken' | 'coinbase' | 'both' = 'both'
 ): Promise<void> {
@@ -187,35 +152,27 @@ export async function syncPortfolioFromExchange(
         for (const [symbol, amount] of Object.entries(coinbaseBalances)) {
           balances[symbol] = (balances[symbol] ?? 0) + amount;
         }
-      } catch {
-        // Coinbase might not be configured
-      }
+      } catch { /* Coinbase might not be configured */ }
     }
 
     if (Object.keys(balances).length === 0) return;
 
-    // Update portfolio table with real balances — always scoped to env='live'
     for (const [symbol, amount] of Object.entries(balances)) {
       if (symbol === 'EUR' || symbol === 'USD') {
-        await sql`
+        await db`
           INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
           VALUES ('EUR', 'EUR', ${amount}, 1, 'live')
           ON CONFLICT (symbol, env) DO UPDATE SET amount = ${amount}, updated_at = NOW()
         `;
       } else {
-        // For crypto, keep avg_buy_price from our records, just update amount
-        const existing = (await sql`
+        const existing = (await db`
           SELECT avg_buy_price_eur FROM portfolio WHERE symbol = ${symbol} AND env = 'live'
         `) as Row[];
 
         if (existing.length > 0) {
-          await sql`
-            UPDATE portfolio SET amount = ${amount}, updated_at = NOW()
-            WHERE symbol = ${symbol} AND env = 'live'
-          `;
+          await db`UPDATE portfolio SET amount = ${amount}, updated_at = NOW() WHERE symbol = ${symbol} AND env = 'live'`;
         } else if (amount > 0.000001) {
-          // New holding — we don't know buy price, use 0 as placeholder
-          await sql`
+          await db`
             INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
             VALUES ('CRYPTO', ${symbol}, ${amount}, 0, 'live')
             ON CONFLICT (symbol, env) DO UPDATE SET amount = ${amount}, updated_at = NOW()
@@ -224,33 +181,25 @@ export async function syncPortfolioFromExchange(
       }
     }
 
-    // Remove live positions that are no longer in exchange
-    const dbHoldings = (await sql`
-      SELECT symbol FROM portfolio WHERE symbol != 'EUR' AND env = 'live'
-    `) as Row[];
-
+    // Remove live positions no longer on exchange
+    const dbHoldings = (await db`SELECT symbol FROM portfolio WHERE symbol != 'EUR' AND env = 'live'`) as Row[];
     for (const holding of dbHoldings) {
       const sym = String(holding.symbol);
       if (!balances[sym] || balances[sym] < 0.000001) {
-        await sql`DELETE FROM portfolio WHERE symbol = ${sym} AND env = 'live'`;
+        await db`DELETE FROM portfolio WHERE symbol = ${sym} AND env = 'live'`;
       }
     }
 
     console.log(`[Sync] Portfolio synced from ${exchange}:`, Object.keys(balances).join(', '));
   } catch (error) {
     console.error('[Sync] Portfolio sync error:', error);
-    // Non-blocking — don't crash the bot
   }
 }
 
-/**
- * Full sync API — call this to refresh portfolio from exchanges
- */
 export async function getConsolidatedBalance(): Promise<{
   kraken: Record<string, number>;
   coinbase: Record<string, number>;
   total: Record<string, number>;
-  error?: string;
 }> {
   let krakenBal: Record<string, number> = {};
   let coinbaseBal: Record<string, number> = {};

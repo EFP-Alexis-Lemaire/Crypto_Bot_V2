@@ -43,9 +43,10 @@ export async function GET(request: Request) {
   }
 
   const cycleId = uuidv4();
-  // Cron always runs on UAT DB — prod is for live trading triggered manually
-  const db = sqlForContext('uat');
-  console.log(`[Bot Cycle ${cycleId}] Starting analysis...`);
+  // Use PROD DB when APP_ENV=production, UAT otherwise
+  const dbContext = process.env.APP_ENV === 'production' ? 'prod' : 'uat';
+  const db = sqlForContext(dbContext);
+  console.log(`[Bot Cycle ${cycleId}] Starting analysis on ${dbContext} DB...`);
 
   try {
     // Check if bot is active
@@ -138,11 +139,11 @@ export async function GET(request: Request) {
     );
 
     // Get current portfolio
-    const portfolio = await getPortfolioSummary(allMarketData);
+    const portfolio = await getPortfolioSummary(allMarketData, undefined, dbContext);
 
     // Check stop-loss / take-profit first
     console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
-    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData);
+    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, undefined, dbContext);
 
     // Sync from exchange if live mode
     if (isLive) {
@@ -176,7 +177,7 @@ export async function GET(request: Request) {
 
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
-        : await executePaperTrade(slDecision, marketCoin, eurUsdRate);
+        : await executePaperTrade(slDecision, marketCoin, eurUsdRate, undefined, dbContext);
       await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message);
 
       // Log decision
@@ -261,7 +262,7 @@ export async function GET(request: Request) {
 
       const result = isLive
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
-        : await executePaperTrade(decision, marketCoin, eurUsdRate);
+        : await executePaperTrade(decision, marketCoin, eurUsdRate, undefined, dbContext);
       executedTrades.push({ decision, result });
 
       // Log decision with full market data
@@ -296,8 +297,8 @@ export async function GET(request: Request) {
     }
 
     // Save portfolio snapshot
-    const updatedPortfolio = await getPortfolioSummary(allMarketData);
-    await savePortfolioSnapshot(updatedPortfolio);
+    const updatedPortfolio = await getPortfolioSummary(allMarketData, undefined, dbContext);
+    await savePortfolioSnapshot(updatedPortfolio, undefined, dbContext);
 
     console.log(
       `[Bot Cycle ${cycleId}] Done. ${executedTrades.length} trades executed.`
