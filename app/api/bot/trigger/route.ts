@@ -93,6 +93,8 @@ export async function POST(request: Request) {
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
         : await executePaperTrade(slDecision, marketCoin, eurUsdRate, undefined, ctx);
       await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive);
+      await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, env)
+        VALUES (${cycleId}, ${slAction.symbol}, 'SELL', ${slAction.reason}, 95, 10, 'stop-loss-trigger',
           ${JSON.stringify({ price: marketCoin.price_eur })}, ${JSON.stringify({})}, ${currentEnv})`;
     }
 

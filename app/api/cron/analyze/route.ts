@@ -293,6 +293,10 @@ export async function GET(request: Request) {
       `;
 
       await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive);
+    }
+
+    // Save portfolio snapshot
+    const updatedPortfolio = await getPortfolioSummary(allMarketData, undefined, dbContext);
     await savePortfolioSnapshot(updatedPortfolio, undefined, dbContext);
 
     console.log(
