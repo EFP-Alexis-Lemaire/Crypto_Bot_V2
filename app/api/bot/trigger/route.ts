@@ -70,10 +70,11 @@ export async function POST(request: Request) {
       })
     );
 
+    // In live mode: sync real balances from exchanges BEFORE reading portfolio
+    if (isLive) await syncPortfolioFromExchange('both');
+
     const portfolio = await getPortfolioSummary(allMarketData, undefined, ctx);
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, undefined, ctx);
-
-    if (isLive) await syncPortfolioFromExchange('both');
 
     const recentlySoldResult = (await db`
       SELECT DISTINCT symbol FROM trades
