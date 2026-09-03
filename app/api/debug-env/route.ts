@@ -4,7 +4,10 @@ import { sqlForContext, getDbContext } from '@/lib/db';
 export async function GET(request: Request) {
   const ctx = getDbContext(request);
   const db = sqlForContext(ctx);
-  const results: Record<string, unknown> = { ctx };
+  const results: Record<string, unknown> = {
+    ctx,
+    APP_ENV: process.env.APP_ENV ?? 'preview',
+  };
 
   // Check each table independently so one failure doesn't block the rest
   try {

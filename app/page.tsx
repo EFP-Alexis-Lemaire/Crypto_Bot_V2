@@ -95,8 +95,34 @@ export default function Dashboard() {
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [morningReport, setMorningReport] = useState<Record<string, unknown> | null>(null);
   const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
-  const [dbContext, setDbContext] = useState<'uat' | 'prod'>('uat');
+  const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
+    // Default to PROD when running on production Vercel deployment
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('dbContext');
+      if (saved === 'uat' || saved === 'prod') return saved;
+    }
+    return 'uat'; // will be overridden below via useEffect
+  });
   const isMounted = useRef(false);
+
+  // On first load: detect deployment env and restore saved preference
+  useEffect(() => {
+    const saved = localStorage.getItem('dbContext') as 'uat' | 'prod' | null;
+    if (saved) {
+      setDbContext(saved);
+    } else {
+      // Auto-detect: if running on production Vercel, default to PROD
+      fetch('/api/debug-env')
+        .then(r => r.json())
+        .then(data => {
+          if (data.APP_ENV === 'production') {
+            setDbContext('prod');
+            localStorage.setItem('dbContext', 'prod');
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
 
   const fetchAll = useCallback(async () => {
     const dbHeaders = { 'x-db-context': dbContext };
@@ -267,11 +293,11 @@ export default function Dashboard() {
             {/* UAT / PROD DB toggle */}
             <div className="flex items-center bg-gray-800 rounded-lg p-1 gap-1">
               <button
-                onClick={() => setDbContext('uat')}
+                onClick={() => { setDbContext('uat'); localStorage.setItem('dbContext', 'uat'); }}
                 className={`px-2.5 py-1 rounded text-xs font-semibold transition-all ${dbContext === 'uat' ? 'bg-blue-500 text-white' : 'text-gray-500 hover:text-gray-300'}`}
               >UAT</button>
               <button
-                onClick={() => setDbContext('prod')}
+                onClick={() => { setDbContext('prod'); localStorage.setItem('dbContext', 'prod'); }}
                 className={`px-2.5 py-1 rounded text-xs font-semibold transition-all ${dbContext === 'prod' ? 'bg-red-500 text-white' : 'text-gray-500 hover:text-gray-300'}`}
               >PROD</button>
             </div>
