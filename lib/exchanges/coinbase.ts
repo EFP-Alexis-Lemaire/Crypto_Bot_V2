@@ -3,24 +3,57 @@ import axios from 'axios';
 
 const COINBASE_API_URL = 'https://api.coinbase.com/api/v3/brokerage';
 
-/**
- * Détecte si la clé est au nouveau format CDP (organizations/...)
- * ou à l'ancien format HMAC legacy
- */
 function isCDPKey(apiKey: string): boolean {
   return apiKey.startsWith('organizations/');
 }
 
 /**
- * Génère un JWT pour l'API CDP Coinbase Advanced Trade
- * Format: organizations/{org_id}/apiKeys/{key_id}
- * Secret: clé privée EC au format PEM (les \n sont encodés en \\n dans l'env var)
+ * Loads a Coinbase CDP private key.
+ * Coinbase CDP now uses Ed25519 by default — the JSON file contains:
+ *   { "id": "...", "privateKey": "<base64 of 64-byte Ed25519 keypair>" }
+ * The first 32 bytes are the private seed, the last 32 are the public key.
  */
+function loadCDPPrivateKey(secret: string): { key: crypto.KeyObject; alg: 'EdDSA' | 'ES256' } {
+  const normalised = secret.replace(/\\n/g, '\n').trim();
+
+  // Already a PEM
+  if (normalised.includes('-----BEGIN')) {
+    const key = crypto.createPrivateKey(normalised);
+    const alg = key.asymmetricKeyType === 'ed25519' ? 'EdDSA' : 'ES256';
+    return { key, alg };
+  }
+
+  const raw = Buffer.from(normalised, 'base64');
+
+  // Ed25519: 64 bytes (32 seed + 32 public) or 32 bytes (seed only)
+  if (raw.length === 64 || raw.length === 32) {
+    const seed = raw.slice(0, 32);
+    // PKCS#8 DER for Ed25519: 30 2e 02 01 00 30 05 06 03 2b 65 70 04 22 04 20 <32-byte seed>
+    const pkcs8Der = Buffer.concat([
+      Buffer.from('302e020100300506032b657004220420', 'hex'),
+      seed,
+    ]);
+    const key = crypto.createPrivateKey({ key: pkcs8Der, format: 'der', type: 'pkcs8' });
+    return { key, alg: 'EdDSA' };
+  }
+
+  // EC P-256: try DER formats
+  for (const type of ['pkcs8', 'sec1'] as const) {
+    try {
+      const key = crypto.createPrivateKey({ key: raw, format: 'der', type });
+      return { key, alg: 'ES256' };
+    } catch { /* try next */ }
+  }
+
+  throw new Error(`Cannot load Coinbase private key — unsupported format (${raw.length} bytes)`);
+}
+
 function buildCDPJWT(apiKey: string, method: string, path: string, secret: string): string {
   const uri = `${method.toUpperCase()} api.coinbase.com${path}`;
+  const { key, alg } = loadCDPPrivateKey(secret);
 
   const header = Buffer.from(JSON.stringify({
-    alg: 'ES256',
+    alg,
     kid: apiKey,
     nonce: crypto.randomBytes(16).toString('hex'),
   })).toString('base64url');
@@ -36,91 +69,19 @@ function buildCDPJWT(apiKey: string, method: string, path: string, secret: strin
 
   const signingInput = `${header}.${payload}`;
 
-  // Build a KeyObject from whatever format Coinbase provides
-  const privateKey = loadCDPPrivateKey(secret);
-
-  const sign = crypto.createSign('SHA256');
-  sign.update(signingInput);
-  const signature = sign.sign(privateKey, 'base64url');
+  // Ed25519 uses sign() directly; EC uses createSign('SHA256')
+  let signature: string;
+  if (alg === 'EdDSA') {
+    signature = crypto.sign(null, Buffer.from(signingInput), key).toString('base64url');
+  } else {
+    const s = crypto.createSign('SHA256');
+    s.update(signingInput);
+    signature = s.sign(key, 'base64url');
+  }
 
   return `${signingInput}.${signature}`;
 }
 
-/**
- * Loads a Coinbase CDP private key from various possible formats:
- * 1. Full PEM (-----BEGIN EC PRIVATE KEY----- or -----BEGIN PRIVATE KEY-----)
- * 2. Raw base64-encoded DER (ECPrivateKey or PKCS#8)
- * 3. Raw 32-byte EC private key scalar in base64
- */
-function loadCDPPrivateKey(secret: string): crypto.KeyObject {
-  const normalised = secret.replace(/\\n/g, '\n').trim();
-
-  // Case 1: already a PEM
-  if (normalised.includes('-----BEGIN')) {
-    return crypto.createPrivateKey(normalised);
-  }
-
-  // Decode base64 to bytes
-  const der = Buffer.from(normalised, 'base64');
-
-  // Case 2: try as raw DER directly (ECPrivateKey or PKCS#8)
-  const formats: Array<{ format: 'der'; type: 'pkcs8' | 'sec1' }> = [
-    { format: 'der', type: 'pkcs8' },
-    { format: 'der', type: 'sec1' },
-  ];
-
-  for (const opts of formats) {
-    try {
-      return crypto.createPrivateKey({ key: der, ...opts });
-    } catch {
-      // try next
-    }
-  }
-
-  // Case 3: raw 32-byte scalar — wrap in minimal ECPrivateKey DER (SEC1) then PKCS#8
-  // ECPrivateKey SEQUENCE: 30 77 02 01 01 04 20 <32 bytes> a0 0a 06 08 <P-256 OID>
-  if (der.length === 32) {
-    // Build SEC1 ECPrivateKey DER for P-256
-    const p256Oid = Buffer.from('06082a8648ce3d030107', 'hex'); // OID P-256
-    const ecOid    = Buffer.from('06072a8648ce3d0201', 'hex');  // OID ecPublicKey
-    // PKCS#8: SEQUENCE { version=0, AlgorithmIdentifier { ecOid, p256Oid }, ECPrivateKey }
-    // Use Node's importKey shortcut via JWK instead
-    const jwk = {
-      kty: 'EC',
-      crv: 'P-256',
-      d: der.toString('base64url'),
-      // x and y are required by JWK but not for signing — use dummy values
-      // Node.js >= 15 allows importing EC private key from JWK without x/y
-      x: Buffer.alloc(32).toString('base64url'),
-      y: Buffer.alloc(32).toString('base64url'),
-    };
-    try {
-      return crypto.createPrivateKey({ key: jwk, format: 'jwk' });
-    } catch {
-      // fall through to error
-    }
-  }
-
-  // Last resort: try JWK with the full bytes as 'd'
-  try {
-    const jwk = {
-      kty: 'EC',
-      crv: 'P-256',
-      d: der.toString('base64url'),
-      x: Buffer.alloc(32).toString('base64url'),
-      y: Buffer.alloc(32).toString('base64url'),
-    };
-    return crypto.createPrivateKey({ key: jwk, format: 'jwk' });
-  } catch {
-    // give up
-  }
-
-  throw new Error(`Cannot load Coinbase private key — unsupported format (${der.length} bytes). Expected PEM, DER, or 32-byte EC scalar.`);
-}
-
-/**
- * Génère la signature HMAC pour l'ancien format de clé Coinbase
- */
 function getCoinbaseSignature(
   timestamp: string,
   method: string,
@@ -129,10 +90,7 @@ function getCoinbaseSignature(
   secret: string
 ): string {
   const message = timestamp + method.toUpperCase() + path + body;
-  return crypto
-    .createHmac('sha256', secret)
-    .update(message)
-    .digest('hex');
+  return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
 
 async function coinbaseRequest<T>(
@@ -153,11 +111,9 @@ async function coinbaseRequest<T>(
   let headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
   if (isCDPKey(apiKey)) {
-    // Nouveau format CDP — authentification JWT
     const jwt = buildCDPJWT(apiKey, method, fullPath, apiSecret);
     headers['Authorization'] = `Bearer ${jwt}`;
   } else {
-    // Ancien format legacy — authentification HMAC
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const signature = getCoinbaseSignature(timestamp, method, fullPath, bodyStr, apiSecret);
     headers = {
@@ -201,8 +157,8 @@ export async function getCoinbaseBalance(): Promise<Record<string, number>> {
 export async function placeCoinbaseOrder(
   productId: string,
   side: 'BUY' | 'SELL',
-  quoteSize?: string,  // EUR amount for market buy
-  baseSize?: string    // crypto amount for market sell
+  quoteSize?: string,
+  baseSize?: string
 ): Promise<{ order_id: string; product_id: string; status: string }> {
   const clientOrderId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -245,7 +201,6 @@ export async function getCoinbaseTicker(productId: string): Promise<{
   };
 }
 
-// Symbol to Coinbase product ID mapping
 export const SYMBOL_TO_COINBASE_PRODUCT: Record<string, string> = {
   BTC: 'BTC-EUR',
   ETH: 'ETH-EUR',
