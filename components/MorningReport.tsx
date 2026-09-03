@@ -86,9 +86,9 @@ export default function MorningReport({ report, onRefresh }: Props) {
     <div className={`border rounded-xl overflow-hidden transition-all ${c.bg} ${c.border}`}>
 
       {/* ── BARRE COMPACTE (toujours visible) ── */}
-      <button
+      <div
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:brightness-110 transition-all text-left"
+        className="w-full flex items-center gap-3 px-4 py-3 hover:brightness-110 transition-all text-left cursor-pointer"
       >
         {/* Icône soleil */}
         <Sun className="w-4 h-4 text-yellow-400 flex-shrink-0" />
@@ -130,7 +130,7 @@ export default function MorningReport({ report, onRefresh }: Props) {
             : <ChevronDown className="w-4 h-4 text-gray-500" />
           }
         </div>
-      </button>
+      </div>
 
       {/* ── CONTENU EXPANDÉ ── */}
       {expanded && (
