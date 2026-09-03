@@ -118,15 +118,26 @@ export async function analyzeMarketWithAI(
 
   try {
     const parsed = JSON.parse(decisionJson);
-    const decisions: BotDecision[] = (parsed.decisions ?? []).filter(
-      (d: BotDecision) => {
-        // Filter by minimum confidence based on risk level
+    const cashAvailable = context.currentPortfolio.cash_eur;
+
+    const decisions: BotDecision[] = (parsed.decisions ?? [])
+      .map((d: BotDecision) => {
+        // Hard cap: amount_eur can never exceed available cash
+        if (d.action === 'BUY' && d.amount_eur > cashAvailable) {
+          d.amount_eur = parseFloat((cashAvailable * 0.80).toFixed(2));
+        }
+        // If after capping the amount is below minimum, convert to SKIP
+        if (d.action === 'BUY' && d.amount_eur < 5) {
+          return { ...d, action: 'SKIP' as const, reasoning: `Cash insuffisant (${cashAvailable.toFixed(2)}€ < 5€ minimum). ${d.reasoning}` };
+        }
+        return d;
+      })
+      .filter((d: BotDecision) => {
         if (d.action === 'BUY' || d.action === 'SELL') {
           return d.confidence >= riskConfig.min_confidence;
         }
         return true;
-      }
-    );
+      });
 
     // Enforce max trades limit
     const remainingTrades = riskConfig.max_trades_per_day - context.tradesExecutedToday;
@@ -203,13 +214,18 @@ ${memoryText}
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
 Taux EUR/USD: ${context.eurUsdRate} (FAVORISE les paires EUR quand disponibles)
 
-=== GESTION DU CASH (CRITIQUE) ===
+=== GESTION DU CASH (RÈGLE ABSOLUE) ===
 Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€
-⚠️ ADAPTE le montant de chaque BUY au cash disponible:
-- Si cash < 100€ → NE PAS proposer de BUY (insuffisant même pour les frais)
-- Si cash entre 100€ et 300€ → montant max = ${Math.floor(context.currentPortfolio.cash_eur * 0.85)}€ (85% du cash)
+Minimum exchange: 5€ par ordre
+
+⚠️ RÈGLE STRICTE SUR LES MONTANTS:
+- amount_eur NE DOIT JAMAIS dépasser le cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€)
+- amount_eur minimum pour un BUY: 5€ (en dessous = SKIP)
+- Si cash < 5€ → SKIP obligatoire, pas de BUY possible
+- Si cash entre 5€ et 50€ → utilise 80% du cash max (soit max ${Math.min(context.currentPortfolio.cash_eur * 0.80, context.currentPortfolio.cash_eur).toFixed(2)}€)
+- Si cash entre 50€ et 300€ → utilise max 85% du cash (soit max ${Math.min(context.currentPortfolio.cash_eur * 0.85, context.currentPortfolio.cash_eur).toFixed(2)}€)
 - Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * riskConfig.max_position_size_pct / 100).toFixed(0)}€ max)
-- NE JAMAIS proposer un montant supérieur au cash disponible
+- EXEMPLE: si cash = 8€ → amount_eur doit être entre 5€ et 6.4€, PAS 500€ ni 1000€
 ${context.defiTVL && context.defiTVL.total_tvl_usd > 0 ? `
 === DONNÉES DEFI (DeFi Llama) ===
 TVL DeFi Total: $${(context.defiTVL.total_tvl_usd / 1e9).toFixed(1)}B
@@ -263,8 +279,9 @@ ${portfolioDetail}
 5. Priorise qualité sur quantité (mieux vaut 1 bon trade que 5 moyens)
 6. Pour les petites cryptos: réduction de position obligatoire (max 5% par position)
 7. Si tu vends, précise pourquoi maintenant et pas plus tôt ou plus tard
-8. FRAIS: chaque trade coûte ~0.26% à l'achat ET ~0.26% à la vente = 0.52% aller-retour. Ne recommande un achat que si tu estimes un potentiel de +3% minimum NET (pour couvrir les frais + générer un vrai gain)
-9. ÉVITE les trades "timides" à faible conviction — si confiance < 65%, dis SKIP plutôt que d'entrer avec un petit montant
+8. FRAIS: chaque trade coûte ~0.26% à l'achat ET ~0.26% à la vente = 0.52% aller-retour. Ne recommande un achat que si tu estimes un potentiel de +2% minimum NET (pour couvrir les frais + générer un vrai gain)
+9. ÉVITE les trades "timides" à faible conviction — si confiance < 65%, dis SKIP
+10. MONTANT OBLIGATOIRE: amount_eur doit toujours être ≤ cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€). Un amount_eur > cash est INVALIDE.
 
 Retourne un JSON avec tes décisions:
 {

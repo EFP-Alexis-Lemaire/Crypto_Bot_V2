@@ -42,7 +42,7 @@ export async function executeLiveTrade(
         : await getCoinbaseBalance();
 
       const cashEur = liveBalance['EUR'] ?? 0;
-      const minTrade = 10;
+      const minTrade = 5; // Kraken/Coinbase minimum ~1€, 5€ est conservateur
 
       if (cashEur < minTrade) {
         return { success: false, message: `Solde insuffisant sur ${exchange}: ${cashEur.toFixed(2)}€` };
