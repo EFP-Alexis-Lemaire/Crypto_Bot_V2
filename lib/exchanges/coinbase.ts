@@ -48,12 +48,14 @@ async function coinbaseRequest<T>(
   }
 
   const fullPath = `/api/v3/brokerage${path}`;
+  // JWT must be signed with path only (no query string)
+  const pathForJwt = fullPath.split('?')[0];
   const bodyStr = body ? JSON.stringify(body) : '';
 
   let headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
   if (isCDPKey(apiKey)) {
-    const jwt = await buildCDPJWT(apiKey, method, fullPath, apiSecret);
+    const jwt = await buildCDPJWT(apiKey, method, pathForJwt, apiSecret);
     headers['Authorization'] = `Bearer ${jwt}`;
   } else {
     const timestamp = Math.floor(Date.now() / 1000).toString();
