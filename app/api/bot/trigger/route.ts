@@ -92,9 +92,7 @@ export async function POST(request: Request) {
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
         : await executePaperTrade(slDecision, marketCoin, eurUsdRate, undefined, ctx);
-      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message);
-      await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, env)
-        VALUES (${cycleId}, ${slAction.symbol}, 'SELL', ${slAction.reason}, 95, 10, 'stop-loss-trigger',
+      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive);
           ${JSON.stringify({ price: marketCoin.price_eur })}, ${JSON.stringify({})}, ${currentEnv})`;
     }
 
@@ -144,7 +142,7 @@ export async function POST(request: Request) {
           ${JSON.stringify({ price_eur: marketCoin.price_eur, change_24h: marketCoin.change_24h, fear_greed: fearGreed.value })},
           ${JSON.stringify(techIndicator ?? {})}, ${relevantNews.map(n => n.title).join(' | ')}, ${currentEnv})`;
 
-      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message);
+      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive);
     }
 
     const updatedPortfolio = await getPortfolioSummary(allMarketData, undefined, ctx);

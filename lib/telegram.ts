@@ -5,15 +5,15 @@ import { fr } from 'date-fns/locale';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-export async function sendTelegramMessage(message: string): Promise<void> {
+export async function sendTelegramMessage(message: string, isLiveMode?: boolean): Promise<void> {
   if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
     console.log('[Telegram] Not configured, skipping message:', message.slice(0, 100));
     return;
   }
 
-  const isLive = process.env.TRADING_MODE === 'live';
-  // Prefix all paper trading messages so they're clearly identifiable
-  const finalMessage = isLive ? message : `🧪 <b>[UAT/PAPER]</b>\n${message}`;
+  // isLiveMode passed explicitly — fallback to env var only if not provided
+  const live = isLiveMode ?? (process.env.TRADING_MODE === 'live');
+  const finalMessage = live ? message : `🧪 <b>[UAT/PAPER]</b>\n${message}`;
 
   try {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -31,7 +31,8 @@ export async function sendDailyReport(
   decisions: BotDecision[],
   tradesCount: number,
   fearGreed: { value: number; label: string },
-  marketSentiment: string
+  marketSentiment: string,
+  isLiveMode?: boolean
 ): Promise<void> {
   const now = new Date();
   const dateStr = format(now, "EEEE d MMMM yyyy", { locale: fr });
@@ -96,18 +97,19 @@ ${holdingsText}
 ${decisionsText}
 
 ━━━━━━━━━━━━━━━━━━━━
-Mode: ${process.env.TRADING_MODE === 'live' ? '🔴 LIVE TRADING (Réel)' : '📝 PAPER TRADING (Fictif)'}
+Mode: ${(isLiveMode ?? process.env.TRADING_MODE === 'live') ? '🔴 LIVE TRADING (Réel)' : '📝 PAPER TRADING (Fictif)'}
 ⏰ Prochain rapport: 18h00
   `.trim();
 
-  await sendTelegramMessage(message);
+  await sendTelegramMessage(message, isLiveMode);
 }
 
 export async function sendTradeAlert(
   decision: BotDecision,
   executed: boolean,
   price_eur: number,
-  message: string
+  message: string,
+  isLiveMode?: boolean
 ): Promise<void> {
   const actionEmoji =
     decision.action === 'BUY' ? '🟢 ACHAT' : decision.action === 'SELL' ? '🔴 VENTE' : '⏸';
@@ -126,5 +128,5 @@ ${statusEmoji} <b>${actionEmoji} ${decision.symbol}</b>
 ${message ? `\n📝 ${message}` : ''}
   `.trim();
 
-  await sendTelegramMessage(alert);
+  await sendTelegramMessage(alert, isLiveMode);
 }
