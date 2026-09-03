@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@coinbase/cdp-sdk": "1.55.0",
     "@neondatabase/serverless": "^1.1.0",
     "@types/uuid": "^10.0.0",
     "@vercel/postgres": "^0.10.0",
