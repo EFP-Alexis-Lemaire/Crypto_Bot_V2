@@ -82,16 +82,31 @@ export async function executeLiveTrade(
     }
 
     if (decision.action === 'SELL') {
+      // Check DB first, then fall back to real exchange balance
       const holdingResult = (await db`
         SELECT * FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'
       `) as Row[];
 
-      if (holdingResult.length === 0 || parseFloat(String(holdingResult[0].amount ?? 0)) <= 0) {
-        return { success: false, message: `Aucune position ${decision.symbol} à vendre` };
+      let holdingAmount: number;
+
+      if (holdingResult.length > 0 && parseFloat(String(holdingResult[0].amount ?? 0)) > 0) {
+        holdingAmount = parseFloat(String(holdingResult[0].amount));
+      } else {
+        // Not in DB — check actual exchange balance
+        try {
+          const liveBalance = exchange === 'kraken'
+            ? await getKrakenBalance()
+            : await getCoinbaseBalance();
+          holdingAmount = liveBalance[decision.symbol] ?? 0;
+        } catch {
+          holdingAmount = 0;
+        }
       }
 
-      const holding = holdingResult[0];
-      const holdingAmount = parseFloat(String(holding.amount));
+      if (holdingAmount <= 0.000001) {
+        return { success: false, message: `Aucune position ${decision.symbol} à vendre (ni en DB ni sur ${exchange})` };
+      }
+
       const sellValue = Math.min(decision.amount_eur, holdingAmount * currentPrice.price_eur);
       const cryptoToSell = sellValue / currentPrice.price_eur;
       const fee = sellValue * PLATFORM_FEE_RATE;
