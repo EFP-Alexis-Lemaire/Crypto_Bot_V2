@@ -74,6 +74,48 @@ export async function POST(request: Request) {
     if (isLive) await syncPortfolioFromExchange('both');
 
     const portfolio = await getPortfolioSummary(allMarketData, undefined, ctx);
+
+    // In live mode: also inject exchange holdings not yet in DB as virtual positions
+    // so the AI can decide to sell them
+    if (isLive) {
+      try {
+        const { getKrakenBalance } = await import('@/lib/exchanges/kraken');
+        const { getCoinbaseBalance } = await import('@/lib/exchanges/coinbase');
+        let exchangeBalances: Record<string, { amount: number; source: string }> = {};
+        try {
+          const kb = await getKrakenBalance();
+          for (const [sym, amt] of Object.entries(kb)) {
+            if (sym !== 'EUR' && amt > 0.000001) exchangeBalances[sym] = { amount: (exchangeBalances[sym]?.amount ?? 0) + amt, source: 'Kraken' };
+          }
+        } catch {}
+        try {
+          const cb = await getCoinbaseBalance();
+          for (const [sym, amt] of Object.entries(cb)) {
+            if (sym !== 'EUR' && sym !== 'USDC' && sym !== 'USDT' && amt > 0.000001) {
+              exchangeBalances[sym] = { amount: (exchangeBalances[sym]?.amount ?? 0) + amt, source: 'Coinbase' };
+            }
+          }
+        } catch {}
+        // Add holdings not in DB portfolio (e.g. staked assets)
+        for (const [sym, { amount }] of Object.entries(exchangeBalances)) {
+          const alreadyInPortfolio = portfolio.holdings.some(h => h.symbol === sym);
+          const marketCoin = allMarketData.find(m => m.symbol === sym);
+          if (!alreadyInPortfolio && marketCoin && amount > 0) {
+            const currentValue = amount * marketCoin.price_eur;
+            portfolio.holdings.push({
+              symbol: sym, name: marketCoin.name, amount,
+              avg_buy_price_eur: 0, // unknown
+              current_price_eur: marketCoin.price_eur,
+              current_value_eur: currentValue,
+              pnl_eur: 0, pnl_percent: 0,
+            });
+            portfolio.crypto_value_eur += currentValue;
+            portfolio.total_value_eur += currentValue;
+          }
+        }
+      } catch { /* non-blocking */ }
+    }
+
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, undefined, ctx);
 
     const recentlySoldResult = (await db`
@@ -152,7 +194,16 @@ export async function POST(request: Request) {
       const result = isLive
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
         : await executePaperTrade(decision, marketCoin, eurUsdRate, undefined, ctx);
-      if (result.success) tradesExecuted++;
+      if (result.success) {
+        tradesExecuted++;
+        // Update portfolio cash in memory so subsequent BUYs in same cycle see updated cash
+        if (decision.action === 'SELL') {
+          const fee = decision.amount_eur * 0.0026;
+          portfolio.cash_eur += decision.amount_eur - fee;
+        } else if (decision.action === 'BUY') {
+          portfolio.cash_eur -= decision.amount_eur;
+        }
+      }
 
       const techIndicator = technicalIndicators.find(t => t.symbol === decision.symbol);
       const relevantNews = news.filter(n => !n.currencies || n.currencies.includes(decision.symbol)).slice(0, 3);

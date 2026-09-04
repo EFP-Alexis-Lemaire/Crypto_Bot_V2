@@ -221,11 +221,18 @@ Minimum exchange: 5€ par ordre
 ⚠️ RÈGLE STRICTE SUR LES MONTANTS:
 - amount_eur NE DOIT JAMAIS dépasser le cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€)
 - amount_eur minimum pour un BUY: 5€ (en dessous = SKIP)
-- Si cash < 5€ → SKIP obligatoire, pas de BUY possible
+- Si cash < 5€ → tu PEUX proposer de VENDRE d'abord une position existante pour libérer du cash, PUIS acheter
 - Si cash entre 5€ et 50€ → utilise 80% du cash max (soit max ${Math.min(context.currentPortfolio.cash_eur * 0.80, context.currentPortfolio.cash_eur).toFixed(2)}€)
 - Si cash entre 50€ et 300€ → utilise max 85% du cash (soit max ${Math.min(context.currentPortfolio.cash_eur * 0.85, context.currentPortfolio.cash_eur).toFixed(2)}€)
 - Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * riskConfig.max_position_size_pct / 100).toFixed(0)}€ max)
 - EXEMPLE: si cash = 8€ → amount_eur doit être entre 5€ et 6.4€, PAS 500€ ni 1000€
+
+=== RÉÉQUILIBRAGE DU PORTEFEUILLE ===
+Si le portefeuille contient des crypto avec pnl_percent proche de 0 ou négatif et que tu veux acheter autre chose:
+- Tu PEUX décider de vendre une position existante (SELL) pour libérer du cash
+- Dans ce cas, mets la SELL en premier dans le tableau decisions[], puis le BUY ensuite
+- La SELL libère du cash qui sera disponible pour le BUY suivant
+- Pour les SELL: amount_eur = valeur actuelle de la position à vendre (current_value_eur)
 ${context.defiTVL && context.defiTVL.total_tvl_usd > 0 ? `
 === DONNÉES DEFI (DeFi Llama) ===
 TVL DeFi Total: $${(context.defiTVL.total_tvl_usd / 1e9).toFixed(1)}B
