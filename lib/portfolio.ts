@@ -21,7 +21,29 @@ export async function getPortfolioSummary(
   ctx?: DbContext
 ): Promise<PortfolioSummary> {
   const db = dbFor(ctx);
-  const env = envOverride ?? await getCurrentEnv();
+  const env = envOverride ?? await getCurrentEnv(ctx);
+
+  // In live mode: sync from exchanges first to get real balances
+  if (env === 'live') {
+    try {
+      const { getKrakenBalance } = await import('./exchanges/kraken');
+      const { getCoinbaseBalance } = await import('./exchanges/coinbase');
+
+      let cashEur = 0;
+      try { const kb = await getKrakenBalance(); cashEur += kb['EUR'] ?? 0; } catch {}
+      try { const cb = await getCoinbaseBalance(); cashEur += cb['EUR'] ?? cb['USDC'] ? (cb['EUR'] ?? 0) + (cb['USDC'] ?? 0) * 0.92 : 0; } catch {}
+
+      // If we got real cash, upsert it in DB so the rest of the logic works
+      if (cashEur > 0) {
+        await db`
+          INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
+          VALUES ('EUR', 'EUR', ${cashEur}, 1, 'live')
+          ON CONFLICT (symbol, env) DO UPDATE SET amount = ${cashEur}, updated_at = NOW()
+        `;
+      }
+    } catch { /* non-blocking */ }
+  }
+
   const holdings = (await db`SELECT * FROM portfolio WHERE env = ${env}`) as Row[];
 
   const priceMap: Record<string, number> = {};
