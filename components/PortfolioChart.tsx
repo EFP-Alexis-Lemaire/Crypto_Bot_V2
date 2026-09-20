@@ -26,6 +26,11 @@ interface Snapshot {
 interface Props {
   snapshots: Snapshot[];
   initialValue?: number;
+  // Valeur live actuelle : ajoutée comme dernier point pour que le graphique
+  // affiche toujours la réalité (même sans snapshots, ex: juste après un reset).
+  currentValue?: number;
+  currentCash?: number;
+  currentCrypto?: number;
 }
 
 const CustomTooltip = ({ active, payload, label, initialValue }: {
@@ -65,7 +70,7 @@ const CustomTooltip = ({ active, payload, label, initialValue }: {
   return null;
 };
 
-export default function PortfolioChart({ snapshots, initialValue = 5000 }: Props) {
+export default function PortfolioChart({ snapshots, initialValue = 5000, currentValue: liveValue, currentCash, currentCrypto }: Props) {
   // Filter outliers: remove snapshots where value is less than 20% of initial
   // These are likely data errors or mid-transaction snapshots
   const minValid = initialValue * 0.20;
@@ -89,17 +94,39 @@ export default function PortfolioChart({ snapshots, initialValue = 5000 }: Props
     });
   }
 
+  // Toujours terminer par la valeur live : le graphique affiche les mêmes
+  // montants que les cartes KPI, même si les snapshots sont vides ou en retard
+  if (liveValue !== undefined && Number.isFinite(liveValue)) {
+    const last = data[data.length - 1];
+    if (last.date !== 'Actuel') {
+      data.push({
+        date: 'Actuel',
+        value: liveValue,
+        cash: currentCash ?? last.cash,
+        crypto: currentCrypto ?? last.crypto,
+      });
+    } else {
+      last.value = liveValue;
+      if (currentCash !== undefined) last.cash = currentCash;
+      if (currentCrypto !== undefined) last.crypto = currentCrypto;
+    }
+  }
+
   const values = data.map(d => d.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
   const currentValue = values[values.length - 1];
   const isPositive = currentValue >= initialValue;
 
-  // Smart Y-axis range: zoom into the actual value range with padding
-  const range = maxValue - minValue;
-  const padding = Math.max(range * 0.15, initialValue * 0.01);
-  const yMin = Math.max(0, minValue - padding);
-  const yMax = maxValue + padding;
+  // Smart Y-axis: zoom serré au lancement (plage des vraies valeurs), ancré sur
+  // la mise initiale pour garder la ligne de référence visible, puis s'élargit
+  // naturellement avec l'historique (dézoom progressif en fonction des données)
+  const lo = Math.min(minValue, initialValue);
+  const hi = Math.max(maxValue, initialValue);
+  const range = hi - lo;
+  const padding = Math.max(range * 0.15, initialValue * 0.005);
+  const yMin = Math.max(0, lo - padding);
+  const yMax = hi + padding;
 
   const pnl = currentValue - initialValue;
   const pnlPct = (pnl / initialValue) * 100;

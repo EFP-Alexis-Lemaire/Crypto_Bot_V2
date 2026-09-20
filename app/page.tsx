@@ -414,7 +414,14 @@ export default function Dashboard() {
                   <BarChart2 className="w-4 h-4 text-blue-400" />
                   Évolution du portefeuille
                 </h3>
-                <PortfolioChart snapshots={snapshots} initialValue={(parseFloat(config.initial_portfolio_eur ?? '5000') || 5000)} key={config.initial_portfolio_eur ?? '5000'} />
+                <PortfolioChart
+                  snapshots={snapshots}
+                  initialValue={(parseFloat(config.initial_portfolio_eur ?? '5000') || 5000)}
+                  key={config.initial_portfolio_eur ?? '5000'}
+                  currentValue={portfolio?.total_value_eur}
+                  currentCash={portfolio?.cash_eur}
+                  currentCrypto={portfolio?.crypto_value_eur}
+                />
               </div>
 
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
