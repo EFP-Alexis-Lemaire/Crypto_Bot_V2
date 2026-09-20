@@ -69,13 +69,30 @@ function rebuildFromTrades(trades: TradeRow[]): Record<string, { qty: number; av
   return out;
 }
 
-// GET = diagnostic read-only (aucune écriture)
+function parseFlag(v: string | null, def: boolean): boolean {
+  if (v === null || v === undefined) return def;
+  return v === '1' || v.toLowerCase() === 'true';
+}
+
+// GET = diagnostic read-only, SAUF si ?run=repair (réparation exécutable
+// directement depuis le navigateur, protégée par le même secret)
 export async function GET(request: Request) {
   if (!authorized(request, undefined, true)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
   const ctx = targetCtx(request);
   const db = sqlForContext(ctx);
+
+  const q = new URL(request.url).searchParams;
+  if (q.get('run') === 'repair') {
+    const report = await runRepair(db, ctx, {
+      doResync: parseFlag(q.get('resync'), true),
+      doFixAvg: parseFlag(q.get('fix_avg'), true),
+      doDeleteSnaps: parseFlag(q.get('delete_snapshots'), false),
+      initialEur: q.get('initial_eur') !== null ? Number(q.get('initial_eur')) : null,
+    });
+    return NextResponse.json({ ctx, via: 'GET', ...report });
+  }
 
   const configRows = (await db`SELECT key, value FROM bot_config`) as Row[];
   const config: Record<string, string> = {};
@@ -157,21 +174,13 @@ export async function GET(request: Request) {
   });
 }
 
-// POST = réparation (écritures). Auth via header Bearer ou body.secret.
-export async function POST(request: Request) {
-  let body: Record<string, unknown> = {};
-  try { body = await request.json(); } catch { /* body vide */ }
-  if (!authorized(request, body.secret, false)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  const ctx = targetCtx(request);
-  const db = sqlForContext(ctx);
-  const report: Record<string, unknown> = { ctx };
-
-  const doResync = body.resync !== false;
-  const doFixAvg = body.fix_avg !== false;
-  const doDeleteSnaps = body.delete_snapshots === true;
-  const initialEur = body.initial_eur !== undefined ? Number(body.initial_eur) : null;
+async function runRepair(
+  db: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<Row[]>,
+  ctx: 'prod' | 'uat',
+  opts: { doResync: boolean; doFixAvg: boolean; doDeleteSnaps: boolean; initialEur: number | null }
+): Promise<Record<string, unknown>> {
+  const { doResync, doFixAvg, doDeleteSnaps, initialEur } = opts;
+  const report: Record<string, unknown> = {};
 
   // 1. Resync montants depuis les exchanges (source de vérité)
   if (doResync) {
@@ -241,5 +250,23 @@ export async function POST(request: Request) {
     })),
   };
 
-  return NextResponse.json(report);
+  return report;
+}
+
+// POST = réparation (écritures). Auth via header Bearer ou body.secret.
+export async function POST(request: Request) {
+  let body: Record<string, unknown> = {};
+  try { body = await request.json(); } catch { /* body vide */ }
+  if (!authorized(request, body.secret, false)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const ctx = targetCtx(request);
+  const db = sqlForContext(ctx);
+  const report = await runRepair(db, ctx, {
+    doResync: body.resync !== false,
+    doFixAvg: body.fix_avg !== false,
+    doDeleteSnaps: body.delete_snapshots === true,
+    initialEur: body.initial_eur !== undefined ? Number(body.initial_eur) : null,
+  });
+  return NextResponse.json({ ctx, via: 'POST', ...report });
 }
