@@ -38,6 +38,8 @@ export async function GET() {
     balances: ExchangeBalance[];
     total_eur: number;
     cash_eur: number;
+    cash_kraken_eur: number;
+    cash_coinbase_eur: number;
     crypto_eur: number;
     kraken_available: boolean;
     coinbase_available: boolean;
@@ -46,6 +48,8 @@ export async function GET() {
     balances: [],
     total_eur: 0,
     cash_eur: 0,
+    cash_kraken_eur: 0,
+    cash_coinbase_eur: 0,
     crypto_eur: 0,
     kraken_available: false,
     coinbase_available: false,
@@ -133,9 +137,18 @@ export async function GET() {
     const source: 'kraken' | 'coinbase' | 'both' =
       sourceArr.length === 2 ? 'both' : sourceArr[0];
 
+    const isKrakenOnly = source === 'kraken';
+    const isCoinbaseOnly = source === 'coinbase';
+
     if (sym === 'EUR') {
       cashEur += amount;
       totalEur += amount;
+      if (isKrakenOnly) result.cash_kraken_eur += amount;
+      else if (isCoinbaseOnly) result.cash_coinbase_eur += amount;
+      else {
+        // EUR présent des deux côtés : on ne peut pas attribuer sans les soldes bruts —
+        // la répartition exacte est recalculée plus bas depuis krakenBal/coinbaseBal
+      }
       result.balances.push({ symbol: 'EUR', amount, price_eur: 1, value_eur: amount, source });
       continue;
     }
@@ -145,6 +158,8 @@ export async function GET() {
       const valueEur = amount * 0.92; // rough EUR/USD
       cashEur += valueEur;
       totalEur += valueEur;
+      if (isKrakenOnly) result.cash_kraken_eur += valueEur;
+      else if (isCoinbaseOnly) result.cash_coinbase_eur += valueEur;
       result.balances.push({ symbol: sym, amount, price_eur: 0.92, value_eur: valueEur, source });
       continue;
     }
@@ -169,6 +184,13 @@ export async function GET() {
     if (b.value_eur !== null) return 1;
     return a.symbol.localeCompare(b.symbol);
   });
+
+  // Répartition exacte du cash par exchange depuis les soldes bruts
+  // (le merge ci-dessus perd l'attribution quand EUR est des deux côtés)
+  const cashOf = (bal: Record<string, number>) =>
+    (bal['EUR'] ?? 0) + (bal['USD'] ?? 0) * 0.92 + (bal['USDC'] ?? 0) * 0.92 + (bal['USDT'] ?? 0) * 0.92;
+  result.cash_kraken_eur = cashOf(krakenBal);
+  result.cash_coinbase_eur = cashOf(coinbaseBal);
 
   result.total_eur = totalEur;
   result.cash_eur = cashEur;

@@ -72,6 +72,12 @@ export interface PortfolioSummary {
   pnl_eur: number;
   pnl_percent: number;
   holdings: PortfolioHolding[];
+  // Cash disponible PAR exchange (mode live uniquement).
+  // cash_eur reste le total (= kraken + coinbase) pour compatibilité.
+  cash_by_exchange?: {
+    kraken: number;
+    coinbase: number;
+  };
 }
 
 export interface RiskConfig {

@@ -160,10 +160,18 @@ export async function POST(request: Request) {
       marketData: allMarketData, technicalIndicators, news, fearGreedIndex: fearGreed, defiTVL,
       currentPortfolio: {
         cash_eur: portfolio.cash_eur, total_value_eur: portfolio.total_value_eur,
+        ...(isLive && portfolio.cash_by_exchange ? {
+          cash_kraken_eur: portfolio.cash_by_exchange.kraken,
+          cash_coinbase_eur: portfolio.cash_by_exchange.coinbase,
+        } : {}),
         holdings: portfolio.holdings.map(h => ({ symbol: h.symbol, amount: h.amount, current_value_eur: h.current_value_eur, pnl_percent: h.pnl_percent })),
       },
       riskLevel, tradesExecutedToday: tradesExecutedToday + stopLossActions.length, eurUsdRate,
     });
+
+    // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
+    let krakenCashMem = portfolio.cash_by_exchange?.kraken ?? portfolio.cash_eur;
+    let coinbaseCashMem = portfolio.cash_by_exchange?.coinbase ?? 0;
 
     let tradesExecuted = 0;
 
@@ -213,18 +221,21 @@ export async function POST(request: Request) {
         }
       }
 
-      // Hard cap: never attempt a BUY with more than available cash
+      // Hard cap: en live, un BUY est payé par UN SEUL exchange -> cap à 80%
+      // du max des deux soldes (jamais du total consolidé). En paper, cap au cash.
       if (decision.action === 'BUY') {
-        const cashEur = portfolio.cash_eur;
-        if (cashEur < 5) {
+        const capBase = isLive ? Math.max(krakenCashMem, coinbaseCashMem) : portfolio.cash_eur;
+        if (capBase < 5) {
           await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
             VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
-              ${`Cash insuffisant (${cashEur.toFixed(2)}€ < 5€ minimum). Trade annulé.`},
+              ${isLive
+                ? `Cash insuffisant par exchange (Kraken: ${krakenCashMem.toFixed(2)}€, Coinbase: ${coinbaseCashMem.toFixed(2)}€ < 5€ minimum). Trade annulé.`
+                : `Cash insuffisant (${portfolio.cash_eur.toFixed(2)}€ < 5€ minimum). Trade annulé.`},
               0, 0, 'cash-guard', ${currentEnv})`;
           continue;
         }
-        // Cap amount to 80% of available cash
-        const maxAllowed = parseFloat((cashEur * 0.80).toFixed(2));
+        // Cap amount to 80% of single-exchange cash
+        const maxAllowed = parseFloat((capBase * 0.80).toFixed(2));
         if (decision.amount_eur > maxAllowed) {
           decision.amount_eur = maxAllowed;
         }
@@ -239,8 +250,19 @@ export async function POST(request: Request) {
         if (decision.action === 'SELL') {
           const fee = decision.amount_eur * 0.0026;
           portfolio.cash_eur += decision.amount_eur - fee;
+          if (isLive) {
+            const usedExchange = (result as { exchange?: 'kraken' | 'coinbase' }).exchange ?? 'kraken';
+            if (usedExchange === 'kraken') krakenCashMem += decision.amount_eur - fee;
+            else coinbaseCashMem += decision.amount_eur - fee;
+          }
         } else if (decision.action === 'BUY') {
           portfolio.cash_eur -= decision.amount_eur;
+          if (isLive) {
+            const usedExchange = (result as { exchange?: 'kraken' | 'coinbase' }).exchange
+              ?? (decision.amount_eur <= krakenCashMem * 0.95 ? 'kraken' : 'coinbase');
+            if (usedExchange === 'kraken') krakenCashMem = Math.max(0, krakenCashMem - decision.amount_eur);
+            else coinbaseCashMem = Math.max(0, coinbaseCashMem - decision.amount_eur);
+          }
         }
       }
 

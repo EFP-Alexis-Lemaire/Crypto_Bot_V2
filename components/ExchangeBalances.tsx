@@ -15,6 +15,8 @@ interface ExchangeData {
   balances: Balance[];
   total_eur: number;
   cash_eur: number;
+  cash_kraken_eur?: number;
+  cash_coinbase_eur?: number;
   crypto_eur: number;
   kraken_available: boolean;
   coinbase_available: boolean;
@@ -130,6 +132,12 @@ export default function ExchangeBalances() {
           <div className="bg-gray-800/50 rounded-xl p-3 text-center">
             <div className="text-gray-500 text-xs mb-1">Cash</div>
             <div className="text-yellow-400 font-bold">{data.cash_eur.toFixed(2)}€</div>
+            {(data.cash_kraken_eur !== undefined || data.cash_coinbase_eur !== undefined) && (
+              <div className="mt-1 space-y-0.5">
+                <div className="text-[11px] text-purple-400">K: {(data.cash_kraken_eur ?? 0).toFixed(2)}€</div>
+                <div className="text-[11px] text-blue-400">C: {(data.cash_coinbase_eur ?? 0).toFixed(2)}€</div>
+              </div>
+            )}
           </div>
           <div className="bg-gray-800/50 rounded-xl p-3 text-center">
             <div className="text-gray-500 text-xs mb-1">Crypto</div>

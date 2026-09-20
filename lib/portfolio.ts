@@ -23,15 +23,27 @@ export async function getPortfolioSummary(
   const db = dbFor(ctx);
   const env = envOverride ?? await getCurrentEnv(ctx);
 
-  // In live mode: sync from exchanges first to get real balances
+  // In live mode: sync from exchanges first to get real balances.
+  // On garde le détail PAR exchange (pas seulement le total) pour que l'IA
+  // et le routeur dimensionnent chaque ordre au cash de l'exchange qui paiera.
+  let cashKraken = 0;
+  let cashCoinbase = 0;
   if (env === 'live') {
     try {
       const { getKrakenBalance } = await import('./exchanges/kraken');
       const { getCoinbaseBalance } = await import('./exchanges/coinbase');
 
       let cashEur = 0;
-      try { const kb = await getKrakenBalance(); cashEur += kb['EUR'] ?? 0; } catch {}
-      try { const cb = await getCoinbaseBalance(); cashEur += cb['EUR'] ?? cb['USDC'] ? (cb['EUR'] ?? 0) + (cb['USDC'] ?? 0) * 0.92 : 0; } catch {}
+      try {
+        const kb = await getKrakenBalance();
+        cashKraken = (kb['EUR'] ?? 0) + (kb['USD'] ?? 0) * 0.92 + (kb['USDC'] ?? 0) * 0.92 + (kb['USDT'] ?? 0) * 0.92;
+        cashEur += cashKraken;
+      } catch {}
+      try {
+        const cb = await getCoinbaseBalance();
+        cashCoinbase = (cb['EUR'] ?? 0) + (cb['USD'] ?? 0) * 0.92 + (cb['USDC'] ?? 0) * 0.92 + (cb['USDT'] ?? 0) * 0.92;
+        cashEur += cashCoinbase;
+      } catch {}
 
       // If we got real cash, upsert it in DB so the rest of the logic works
       if (cashEur > 0) {
@@ -99,6 +111,7 @@ export async function getPortfolioSummary(
     pnl_eur,
     pnl_percent,
     holdings: holdingDetails.filter(h => h.amount > 0),
+    ...(env === 'live' ? { cash_by_exchange: { kraken: cashKraken, coinbase: cashCoinbase } } : {}),
   };
 }
 

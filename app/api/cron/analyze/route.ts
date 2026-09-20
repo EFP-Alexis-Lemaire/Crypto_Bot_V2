@@ -224,7 +224,8 @@ export async function GET(request: Request) {
       `;
     }
 
-    // AI Analysis
+    // AI Analysis — en live on transmet le cash PAR exchange pour que l'IA
+    // dimensionne chaque ordre au cash d'un seul exchange (pas au total consolidé)
     console.log(`[Bot Cycle ${cycleId}] Running AI analysis...`);
     const decisions = await analyzeMarketWithAI({
       marketData: allMarketData,
@@ -235,6 +236,10 @@ export async function GET(request: Request) {
       currentPortfolio: {
         cash_eur: portfolio.cash_eur,
         total_value_eur: portfolio.total_value_eur,
+        ...(isLive && portfolio.cash_by_exchange ? {
+          cash_kraken_eur: portfolio.cash_by_exchange.kraken,
+          cash_coinbase_eur: portfolio.cash_by_exchange.coinbase,
+        } : {}),
         holdings: portfolio.holdings.map(h => ({
           symbol: h.symbol,
           amount: h.amount,
@@ -246,6 +251,12 @@ export async function GET(request: Request) {
       tradesExecutedToday: tradesExecutedToday + stopLossActions.length,
       eurUsdRate,
     });
+
+    // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
+    // (le routeur dans executeLiveTrade relit les vrais soldes à chaque ordre :
+    // ceci sert juste à capper correctement AVANT l'appel exchange)
+    let krakenCashMem = portfolio.cash_by_exchange?.kraken ?? portfolio.cash_eur;
+    let coinbaseCashMem = portfolio.cash_by_exchange?.coinbase ?? 0;
 
     // Always log the cycle, even if no decisions
     if (decisions.length === 0) {
@@ -317,17 +328,20 @@ export async function GET(request: Request) {
         }
       }
 
-      // Hard cap: never attempt a BUY with more than available cash
+      // Hard cap: en live, un BUY est payé par UN SEUL exchange -> cap à 80%
+      // du max des deux soldes (jamais du total consolidé). En paper, cap au cash.
       if (decision.action === 'BUY') {
-        const cashEur = portfolio.cash_eur;
-        if (cashEur < 5) {
+        const capBase = isLive ? Math.max(krakenCashMem, coinbaseCashMem) : portfolio.cash_eur;
+        if (capBase < 5) {
           await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
             VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
-              ${`Cash insuffisant (${cashEur.toFixed(2)}€ < 5€ minimum). Trade annulé.`},
+              ${isLive
+                ? `Cash insuffisant par exchange (Kraken: ${krakenCashMem.toFixed(2)}€, Coinbase: ${coinbaseCashMem.toFixed(2)}€ < 5€ minimum). Trade annulé.`
+                : `Cash insuffisant (${portfolio.cash_eur.toFixed(2)}€ < 5€ minimum). Trade annulé.`},
               0, 0, 'cash-guard', ${currentEnv})`;
           continue;
         }
-        const maxAllowed = parseFloat((cashEur * 0.80).toFixed(2));
+        const maxAllowed = parseFloat((capBase * 0.80).toFixed(2));
         if (decision.amount_eur > maxAllowed) {
           decision.amount_eur = maxAllowed;
         }
@@ -337,6 +351,24 @@ export async function GET(request: Request) {
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
         : await executePaperTrade(decision, marketCoin, eurUsdRate, currentEnv, dbContext);
       executedTrades.push({ decision, result });
+
+      // Màj mémoire du cash par exchange après chaque trade réussi
+      // (pour que les BUYs suivants du même cycle voient le cash restant)
+      if (result.success && isLive) {
+        const usedExchange = (result as { exchange?: 'kraken' | 'coinbase' }).exchange
+          ?? (decision.amount_eur <= krakenCashMem * 0.95 ? 'kraken' : 'coinbase');
+        if (decision.action === 'BUY') {
+          if (usedExchange === 'kraken') krakenCashMem = Math.max(0, krakenCashMem - decision.amount_eur);
+          else coinbaseCashMem = Math.max(0, coinbaseCashMem - decision.amount_eur);
+          portfolio.cash_eur = Math.max(0, portfolio.cash_eur - decision.amount_eur);
+        } else if (decision.action === 'SELL') {
+          // La vente crédite l'exchange vendeur (montant net approximatif)
+          const credited = decision.amount_eur * 0.9974;
+          if (usedExchange === 'kraken') krakenCashMem += credited;
+          else coinbaseCashMem += credited;
+          portfolio.cash_eur += credited;
+        }
+      }
 
       // Log decision with full market data
       const techIndicator = technicalIndicators.find(

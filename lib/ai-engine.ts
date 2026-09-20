@@ -22,6 +22,10 @@ interface AnalysisContext {
   currentPortfolio: {
     cash_eur: number;
     total_value_eur: number;
+    // Cash disponible PAR exchange (mode live multi-exchange).
+    // Si absent (paper), cash_eur fait foi.
+    cash_kraken_eur?: number;
+    cash_coinbase_eur?: number;
     holdings: Array<{
       symbol: string;
       amount: number;
@@ -119,12 +123,23 @@ export async function analyzeMarketWithAI(
   try {
     const parsed = JSON.parse(decisionJson);
     const cashAvailable = context.currentPortfolio.cash_eur;
+    // En mode live multi-exchange, un ordre est payé par UN SEUL exchange :
+    // le cap se fait sur le max des deux soldes, jamais sur le total consolidé.
+    const hasSplit = context.currentPortfolio.cash_kraken_eur !== undefined
+      || context.currentPortfolio.cash_coinbase_eur !== undefined;
+    const maxSingleExchangeCash = hasSplit
+      ? Math.max(
+          context.currentPortfolio.cash_kraken_eur ?? 0,
+          context.currentPortfolio.cash_coinbase_eur ?? 0,
+        )
+      : cashAvailable;
+    const capBase = Math.min(cashAvailable, maxSingleExchangeCash);
 
     const decisions: BotDecision[] = (parsed.decisions ?? [])
       .map((d: BotDecision) => {
-        // Hard cap: amount_eur can never exceed available cash
-        if (d.action === 'BUY' && d.amount_eur > cashAvailable) {
-          d.amount_eur = parseFloat((cashAvailable * 0.80).toFixed(2));
+        // Hard cap: amount_eur can never exceed the cash of a single exchange
+        if (d.action === 'BUY' && d.amount_eur > capBase) {
+          d.amount_eur = parseFloat((capBase * 0.80).toFixed(2));
         }
         // If after capping the amount is below minimum, convert to SKIP
         if (d.action === 'BUY' && d.amount_eur < 5) {
@@ -175,7 +190,7 @@ ACTUALITÉS RÉCENTES:
 ${newsSummary}
 
 PORTEFEUILLE ACTUEL:
-- Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€
+- Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€${context.currentPortfolio.cash_kraken_eur !== undefined ? ` (Kraken: ${context.currentPortfolio.cash_kraken_eur.toFixed(2)}€ / Coinbase: ${(context.currentPortfolio.cash_coinbase_eur ?? 0).toFixed(2)}€ — un achat est payé par UN SEUL exchange)` : ''}
 - Valeur totale: ${context.currentPortfolio.total_value_eur.toFixed(2)}€
 - Positions: ${context.currentPortfolio.holdings.map(h => `${h.symbol}: ${h.current_value_eur.toFixed(2)}€ (${h.pnl_percent.toFixed(1)}%)`).join(', ') || 'Aucune'}
 
@@ -215,17 +230,23 @@ Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.labe
 Taux EUR/USD: ${context.eurUsdRate} (FAVORISE les paires EUR quand disponibles)
 
 === GESTION DU CASH (RÈGLE ABSOLUE) ===
-Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€
+Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€${context.currentPortfolio.cash_kraken_eur !== undefined ? `
+Cash PAR EXCHANGE (un achat est payé par UN SEUL exchange !):
+- Kraken: ${context.currentPortfolio.cash_kraken_eur.toFixed(2)}€
+- Coinbase: ${(context.currentPortfolio.cash_coinbase_eur ?? 0).toFixed(2)}€
+- Cash utilisable pour UN ordre = max des deux = ${Math.max(context.currentPortfolio.cash_kraken_eur, context.currentPortfolio.cash_coinbase_eur ?? 0).toFixed(2)}€ (PAS le total ${context.currentPortfolio.cash_eur.toFixed(2)}€)
+- Le routeur paie avec Kraken en priorité (frais faibles), sinon Coinbase si Kraken insuffisant` : ''}
 Minimum exchange: 5€ par ordre
 
 ⚠️ RÈGLE STRICTE SUR LES MONTANTS:
-- amount_eur NE DOIT JAMAIS dépasser le cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€)
+- amount_eur NE DOIT JAMAIS dépasser ${context.currentPortfolio.cash_kraken_eur !== undefined ? `le cash d'UN SEUL exchange (max ${Math.max(context.currentPortfolio.cash_kraken_eur, context.currentPortfolio.cash_coinbase_eur ?? 0).toFixed(2)}€, PAS le total ${context.currentPortfolio.cash_eur.toFixed(2)}€)` : `le cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€)`}
 - amount_eur minimum pour un BUY: 5€ (en dessous = SKIP)
 - Si cash < 5€ → tu PEUX proposer de VENDRE d'abord une position existante pour libérer du cash, PUIS acheter
-- Si cash entre 5€ et 50€ → utilise 80% du cash max (soit max ${Math.min(context.currentPortfolio.cash_eur * 0.80, context.currentPortfolio.cash_eur).toFixed(2)}€)
-- Si cash entre 50€ et 300€ → utilise max 85% du cash (soit max ${Math.min(context.currentPortfolio.cash_eur * 0.85, context.currentPortfolio.cash_eur).toFixed(2)}€)
+- Si cash entre 5€ et 50€ → utilise 80% du cash max (soit max ${(Math.min(context.currentPortfolio.cash_eur, context.currentPortfolio.cash_kraken_eur !== undefined ? Math.max(context.currentPortfolio.cash_kraken_eur, context.currentPortfolio.cash_coinbase_eur ?? 0) : context.currentPortfolio.cash_eur) * 0.80).toFixed(2)}€)
+- Si cash entre 50€ et 300€ → utilise max 85% du cash (soit max ${(Math.min(context.currentPortfolio.cash_eur, context.currentPortfolio.cash_kraken_eur !== undefined ? Math.max(context.currentPortfolio.cash_kraken_eur, context.currentPortfolio.cash_coinbase_eur ?? 0) : context.currentPortfolio.cash_eur) * 0.85).toFixed(2)}€)
 - Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * riskConfig.max_position_size_pct / 100).toFixed(0)}€ max)
-- EXEMPLE: si cash = 8€ → amount_eur doit être entre 5€ et 6.4€, PAS 500€ ni 1000€
+- EXEMPLE: si cash = 8€ → amount_eur doit être entre 5€ et 6.4€, PAS 500€ ni 1000€${context.currentPortfolio.cash_kraken_eur !== undefined ? `
+- EXEMPLE MULTI-EXCHANGE: Kraken 100€ + Coinbase 500€ → amount_eur max = 400€ (80% de 500€), JAMAIS 480€ (80% du total 600€)` : ''}
 
 === RÉÉQUILIBRAGE DU PORTEFEUILLE ===
 Si le portefeuille contient des crypto avec pnl_percent proche de 0 ou négatif et que tu veux acheter autre chose:
@@ -288,7 +309,7 @@ ${portfolioDetail}
 7. Si tu vends, précise pourquoi maintenant et pas plus tôt ou plus tard
 8. FRAIS: chaque trade coûte ~0.26% à l'achat ET ~0.26% à la vente = 0.52% aller-retour. Ne recommande un achat que si tu estimes un potentiel de +2% minimum NET (pour couvrir les frais + générer un vrai gain)
 9. ÉVITE les trades "timides" à faible conviction — si confiance < 65%, dis SKIP
-10. MONTANT OBLIGATOIRE: amount_eur doit toujours être ≤ cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€). Un amount_eur > cash est INVALIDE.
+10. MONTANT OBLIGATOIRE: amount_eur doit toujours être ≤ cash d'UN SEUL exchange (${context.currentPortfolio.cash_kraken_eur !== undefined ? `max ${Math.max(context.currentPortfolio.cash_kraken_eur, context.currentPortfolio.cash_coinbase_eur ?? 0).toFixed(2)}€, pas le total ${context.currentPortfolio.cash_eur.toFixed(2)}€` : `${context.currentPortfolio.cash_eur.toFixed(2)}€`}). Un amount_eur supérieur est INVALIDE.
 11. POUSSIÈRES INTERDITES: ne propose JAMAIS un SELL si current_value_eur < 5€ (minimum exchange Kraken/Coinbase). En dessous de 5€ dis SKIP — l'ordre serait rejeté ("volume minimum not met").
 12. VENTE INTERDITE SUR ACTIF NON DÉTENU: un SELL n'est valide QUE si le symbole figure dans PORTEFEUILLE ACTUEL avec current_value_eur ≥ 5€. Vendre un actif que tu ne détiens pas est IMPOSSIBLE (l'exchange rejette l'ordre). Si tu n'as pas la position → réponds HOLD ou SKIP, JAMAIS SELL. Pour un SELL: amount_eur = current_value_eur de la position (pas plus).
 
