@@ -3,6 +3,7 @@ import { BotDecision, MarketData } from '../types';
 import {
   placeKrakenOrder,
   getKrakenBalance,
+  resolveKrakenPair,
   SYMBOL_TO_KRAKEN_PAIR,
 } from './kraken';
 import {
@@ -63,7 +64,10 @@ export async function chooseExchangeForBuy(
   symbol: string,
   amountEur: number
 ): Promise<{ exchange: 'kraken' | 'coinbase' | null; krakenCash: number; coinbaseCash: number; reason: string }> {
-  const onKraken = Boolean(SYMBOL_TO_KRAKEN_PAIR[symbol]);
+  // Kraken : mapping statique + découverte dynamique des paires EUR
+  // (endpoint public). Coinbase : mapping + vérification produit ci-dessous.
+  const krakenPair = await resolveKrakenPair(symbol);
+  const onKraken = Boolean(krakenPair);
   const onCoinbase = Boolean(SYMBOL_TO_COINBASE_PRODUCT[symbol]);
   if (!onKraken && !onCoinbase) {
     return { exchange: null, krakenCash: 0, coinbaseCash: 0, reason: `${symbol} non disponible sur Kraken ou Coinbase` };
@@ -107,7 +111,7 @@ export const MIN_SELL_EUR = 5;
 export const MIN_VOLUME_PER_SYMBOL: Record<string, number> = {
   BTC: 0.0001, ETH: 0.002, SOL: 0.02, ADA: 5, DOT: 1, AVAX: 0.2,
   LINK: 0.5, UNI: 0.5, AAVE: 0.05, LTC: 0.05, XRP: 10, MATIC: 5,
-  ARB: 2, OP: 2, NEAR: 1, ALGO: 10,
+  ARB: 2, OP: 2, NEAR: 1, ALGO: 10, CRV: 2, MKR: 0.005,
 };
 
 export function isDustSell(symbol: string, cryptoAmount: number, sellValueEur: number): string | null {
@@ -145,7 +149,7 @@ export async function executeLiveTrade(
       let txid: string | undefined;
 
       if (exchange === 'kraken') {
-        const pair = SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
+        const pair = (await resolveKrakenPair(decision.symbol)) ?? SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
         const result = await placeKrakenOrder(pair, 'buy', ((actualAmount - fee) / currentPrice.price_eur).toFixed(8));
         txid = result.txid[0];
       } else {
@@ -188,18 +192,21 @@ export async function executeLiveTrade(
       let exchange: 'kraken' | 'coinbase' | null = null;
       let holdingAmount = 0;
 
+      // Paire Kraken résolue (mapping + découverte dynamique des paires EUR)
+      const krakenPair = await resolveKrakenPair(decision.symbol);
+
       // Check DB first
       const holdingResult = (await db`SELECT * FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'`) as Row[];
       if (holdingResult.length > 0 && parseFloat(String(holdingResult[0].amount ?? 0)) > 0) {
         holdingAmount = parseFloat(String(holdingResult[0].amount));
         // Determine exchange from which exchange has this pair
-        exchange = SYMBOL_TO_KRAKEN_PAIR[decision.symbol] ? 'kraken' : 'coinbase';
+        exchange = krakenPair ? 'kraken' : 'coinbase';
       }
 
       // Not in DB — check real exchange balances
       if (holdingAmount <= 0.000001) {
         // Check Kraken first
-        if (SYMBOL_TO_KRAKEN_PAIR[decision.symbol]) {
+        if (krakenPair) {
           try {
             const kb = await getKrakenBalance();
             if ((kb[decision.symbol] ?? 0) > 0.000001) {
@@ -238,7 +245,7 @@ export async function executeLiveTrade(
       let txid: string | undefined;
 
       if (exchange === 'kraken') {
-        const pair = SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
+        const pair = krakenPair ?? SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
         const result = await placeKrakenOrder(pair, 'sell', cryptoToSell.toFixed(8));
         txid = result.txid[0];
       } else {

@@ -259,4 +259,6 @@ export const SYMBOL_TO_COINBASE_PRODUCT: Record<string, string> = {
   ARB: 'ARB-EUR',
   NEAR: 'NEAR-EUR',
   ALGO: 'ALGO-EUR',
+  CRV: 'CRV-EUR',
+  MKR: 'MKR-EUR',
 };

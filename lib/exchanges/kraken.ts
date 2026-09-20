@@ -160,7 +160,7 @@ function normalizeCurrency(currency: string): string {
   return map[currency] ?? currency;
 }
 
-// Symbol to Kraken pair mapping
+// Symbol to Kraken pair mapping (fast path — voir resolveKrakenPair pour le reste)
 export const SYMBOL_TO_KRAKEN_PAIR: Record<string, string> = {
   BTC: 'XXBTZEUR',
   ETH: 'XETHZEUR',
@@ -178,4 +178,42 @@ export const SYMBOL_TO_KRAKEN_PAIR: Record<string, string> = {
   OP: 'OPEUR',
   NEAR: 'NEAREUR',
   ALGO: 'ALGOEUR',
+  CRV: 'CRVEUR',
+  MKR: 'MKREUR',
 };
+
+// Découverte dynamique des paires EUR via l'endpoint public AssetPairs
+// (sans auth) : couvre les symboles absents du mapping statique (ex: CRV
+// avant son ajout). Cache 1h, fail-open (null si inaccessible).
+let _pairsCache: { byWsname: Map<string, string>; fetchedAt: number } | null = null;
+const PAIRS_TTL_MS = 60 * 60 * 1000;
+
+async function getKrakenEurPairMap(): Promise<Map<string, string>> {
+  if (_pairsCache && Date.now() - _pairsCache.fetchedAt < PAIRS_TTL_MS) {
+    return _pairsCache.byWsname;
+  }
+  const result = await krakenPublic('AssetPairs') as Record<string, {
+    altname?: string; wsname?: string; base?: string; quote?: string;
+  }>;
+  const byWsname = new Map<string, string>();
+  for (const [pairKey, info] of Object.entries(result)) {
+    // wsname "CRV/EUR" est l'identifiant stable ; le quote doit être EUR
+    if (info.wsname && info.wsname.endsWith('/EUR')) {
+      byWsname.set(info.wsname, pairKey);
+    } else if (info.altname && info.altname.endsWith('EUR') && info.quote === 'ZEUR') {
+      const base = info.altname.slice(0, -3);
+      byWsname.set(`${base}/EUR`, pairKey);
+    }
+  }
+  _pairsCache = { byWsname, fetchedAt: Date.now() };
+  return byWsname;
+}
+
+export async function resolveKrakenPair(symbol: string): Promise<string | null> {
+  if (SYMBOL_TO_KRAKEN_PAIR[symbol]) return SYMBOL_TO_KRAKEN_PAIR[symbol];
+  try {
+    return (await getKrakenEurPairMap()).get(`${symbol}/EUR`) ?? null;
+  } catch {
+    return null;
+  }
+}
