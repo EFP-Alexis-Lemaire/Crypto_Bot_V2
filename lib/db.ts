@@ -87,6 +87,13 @@ export async function initializeDatabase() {
     )
   `;
 
+  // Requis par les upserts ON CONFLICT (symbol, env) dans portfolio.ts et live-trader.ts.
+  // Sans cet index : "there is no unique or exclusion constraint matching the ON CONFLICT specification".
+  await db`
+    CREATE UNIQUE INDEX IF NOT EXISTS portfolio_symbol_env_uidx
+    ON portfolio (symbol, env)
+  `;
+
   // Trades history
   await db`
     CREATE TABLE IF NOT EXISTS trades (

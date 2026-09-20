@@ -283,7 +283,15 @@ export async function checkStopLossAndTakeProfit(
     const market = marketData.find(m => m.symbol === symbol);
     if (!market) continue;
 
+    // Filtre dust : une poussière (< 5€) ne doit jamais déclencher un SELL
+    // (Kraken rejette avec "volume minimum not met")
+    const amount = parseFloat(str(holding, 'amount'));
+    if (amount * market.price_eur < 5) continue;
+
     const avgBuyPrice = parseFloat(str(holding, 'avg_buy_price_eur'));
+    // avg_buy_price = 0 (positions sync depuis l'exchange) : pas de base de calcul -> skip
+    // pour éviter un take-profit/stop-loss aberrant et une tentative de vente de poussière
+    if (!(avgBuyPrice > 0)) continue;
     const change = ((market.price_eur - avgBuyPrice) / avgBuyPrice) * 100;
 
     if (change <= -stopLossPct) {

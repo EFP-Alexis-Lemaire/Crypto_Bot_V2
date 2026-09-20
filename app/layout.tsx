@@ -7,6 +7,8 @@ const inter = Inter({ subsets: ['latin'] });
 export const metadata: Metadata = {
   title: 'CryptoBot AI — Dashboard',
   description: 'Bot de trading crypto alimenté par GPT-4',
+  // Dashboard privé : jamais indexé par les moteurs de recherche
+  robots: { index: false, follow: false, nocache: true },
 };
 
 

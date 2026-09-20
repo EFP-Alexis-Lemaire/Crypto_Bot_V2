@@ -63,10 +63,14 @@ export async function POST(request: Request) {
     const technicalIndicators: TechnicalIndicators[] = [];
     await Promise.all(
       allMarketData.slice(0, 15).map(async coin => {
-        const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ?? coin.symbol.toLowerCase();
-        const history = await getCoinHistory(coinId, 60);
-        const prices = history.map(h => h.price);
-        if (prices.length >= 26) technicalIndicators.push({ symbol: coin.symbol, ...calculateTechnicalIndicators(prices) });
+        try {
+          const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ?? coin.symbol.toLowerCase();
+          const history = await getCoinHistory(coinId, 60);
+          const prices = history.map(h => h.price);
+          if (prices.length >= 26) technicalIndicators.push({ symbol: coin.symbol, ...calculateTechnicalIndicators(prices) });
+        } catch (e) {
+          console.warn(`[Trigger ${cycleId}] history skip ${coin.symbol}:`, String(e));
+        }
       })
     );
 
@@ -97,11 +101,14 @@ export async function POST(request: Request) {
           }
         } catch {}
         // Add holdings not in DB portfolio (e.g. staked assets)
+        // Filtre dust : on n'injecte pas les poussières (< 5€) pour que l'IA
+        // ne propose pas de les vendre (Kraken: volume minimum not met)
         for (const [sym, { amount }] of Object.entries(exchangeBalances)) {
           const alreadyInPortfolio = portfolio.holdings.some(h => h.symbol === sym);
           const marketCoin = allMarketData.find(m => m.symbol === sym);
           if (!alreadyInPortfolio && marketCoin && amount > 0) {
             const currentValue = amount * marketCoin.price_eur;
+            if (currentValue < 5) continue;
             portfolio.holdings.push({
               symbol: sym, name: marketCoin.name, amount,
               avg_buy_price_eur: 0, // unknown
@@ -127,9 +134,17 @@ export async function POST(request: Request) {
     for (const slAction of stopLossActions) {
       const marketCoin = allMarketData.find(m => m.symbol === slAction.symbol);
       if (!marketCoin) continue;
+      const positionValue = portfolio.holdings.find(h => h.symbol === slAction.symbol)?.current_value_eur ?? 0;
+      if (positionValue < 5) {
+        await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+          VALUES (${cycleId}, ${slAction.symbol}, 'SKIP',
+            ${`Poussière ignorée: position ${positionValue.toFixed(2)}€ < 5€ minimum exchange. ${slAction.reason}`},
+            0, 0, 'dust-filter', ${currentEnv})`;
+        continue;
+      }
       const slDecision: BotDecision = {
         symbol: slAction.symbol, action: 'SELL',
-        amount_eur: portfolio.holdings.find(h => h.symbol === slAction.symbol)?.current_value_eur ?? 0,
+        amount_eur: positionValue,
         reasoning: slAction.reason, confidence: 95, risk_score: 10, timeframe: 'Immédiat',
       };
       const result = isLive
@@ -173,6 +188,30 @@ export async function POST(request: Request) {
 
       const marketCoin = allMarketData.find(m => m.symbol === decision.symbol);
       if (!marketCoin) continue;
+
+      // Garde-fou SELL : position réellement détenue, sinon SKIP silencieux
+      // (sans appel exchange ni alerte Telegram). Évite les SELL hallucinés
+      // par l'IA sur des actifs non détenus + cap au montant détenu.
+      if (decision.action === 'SELL') {
+        const held = portfolio.holdings.find(h => h.symbol === decision.symbol);
+        if (!held) {
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Vente impossible: aucune position ${decision.symbol} en portefeuille. ${decision.reasoning}`},
+              0, 0, 'no-position', ${currentEnv})`;
+          continue;
+        }
+        if (held.current_value_eur < 5) {
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Poussière ignorée: vente ${held.current_value_eur.toFixed(2)}€ < 5€ minimum exchange. ${decision.reasoning}`},
+              0, 0, 'dust-filter', ${currentEnv})`;
+          continue;
+        }
+        if (decision.amount_eur > held.current_value_eur) {
+          decision.amount_eur = parseFloat(held.current_value_eur.toFixed(2));
+        }
+      }
 
       // Hard cap: never attempt a BUY with more than available cash
       if (decision.action === 'BUY') {

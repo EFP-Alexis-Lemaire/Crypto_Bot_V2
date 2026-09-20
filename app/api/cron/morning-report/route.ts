@@ -4,6 +4,7 @@ import { getMarketData, getFearGreedIndex, getEurUsdRate, getCryptoNews } from '
 import { getPortfolioSummary } from '@/lib/portfolio';
 import { WATCHLIST_COINS } from '@/lib/market-data';
 import { sendTelegramMessage } from '@/lib/telegram';
+import { cronUnauthorized } from '@/lib/cron-auth';
 import OpenAI from 'openai';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
@@ -129,13 +130,8 @@ Génère un rapport JSON structuré et précis:
 }
 
 export async function GET(request: Request) {
-  const authHeader = request.headers.get('authorization');
-  if (
-    process.env.CRON_SECRET &&
-    authHeader !== `Bearer ${process.env.CRON_SECRET}`
-  ) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const unauthorized = cronUnauthorized(request);
+  if (unauthorized) return unauthorized;
 
   try {
     const [marketData, fearGreedRaw, eurUsd, news] = await Promise.all([

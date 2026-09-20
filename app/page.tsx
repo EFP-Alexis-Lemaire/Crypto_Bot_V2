@@ -414,7 +414,7 @@ export default function Dashboard() {
                   <BarChart2 className="w-4 h-4 text-blue-400" />
                   Évolution du portefeuille
                 </h3>
-                <PortfolioChart snapshots={snapshots} initialValue={5000} />
+                <PortfolioChart snapshots={snapshots} initialValue={(parseFloat(config.initial_portfolio_eur ?? '5000') || 5000)} key={config.initial_portfolio_eur ?? '5000'} />
               </div>
 
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
@@ -424,7 +424,7 @@ export default function Dashboard() {
                 </h3>
                 <HoldingsPieChart
                   holdings={portfolio?.holdings ?? []}
-                  cashEur={portfolio?.cash_eur ?? 5000}
+                  cashEur={(portfolio?.cash_eur ?? (parseFloat(config.initial_portfolio_eur ?? '5000') || 5000))}
                 />
               </div>
             </div>
@@ -501,9 +501,9 @@ export default function Dashboard() {
                 dbContext={dbContext}
               />
               <CashoutPanel
-                portfolio={portfolio ?? { total_value_eur: 5000, cash_eur: 5000, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }}
+                portfolio={portfolio ?? (() => { const init = (parseFloat(config.initial_portfolio_eur ?? '5000') || 5000); return { total_value_eur: init, cash_eur: init, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }; })()}
                 trades={trades}
-                initialInvestment={parseFloat(config.initial_portfolio_eur ?? '5000')}
+                initialInvestment={(parseFloat(config.initial_portfolio_eur ?? '5000') || 5000)}
                 aiCosts={aiCosts as Parameters<typeof CashoutPanel>[0]['aiCosts']}
               />
             </div>

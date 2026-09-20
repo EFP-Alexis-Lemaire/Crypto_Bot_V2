@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro } from 'lucide-react';
 
 interface Config {
@@ -83,6 +83,20 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
   });
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  // Sync avec la config serveur (ex: après fetchAll ou changement de contexte UAT/PROD)
+  useEffect(() => {
+    setLocalConfig({
+      risk_level: config.risk_level ?? 'moderate',
+      is_active: config.is_active ?? 'true',
+      trading_mode: config.trading_mode ?? 'paper',
+      max_trades_per_day: config.max_trades_per_day ?? '5',
+      stop_loss_pct: config.stop_loss_pct ?? '8',
+      take_profit_pct: config.take_profit_pct ?? '15',
+      max_position_size_pct: config.max_position_size_pct ?? '20',
+      initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
+    });
+  }, [config]);
 
   const isActive = localConfig.is_active === 'true';
 

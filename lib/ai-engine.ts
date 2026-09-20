@@ -289,6 +289,8 @@ ${portfolioDetail}
 8. FRAIS: chaque trade coûte ~0.26% à l'achat ET ~0.26% à la vente = 0.52% aller-retour. Ne recommande un achat que si tu estimes un potentiel de +2% minimum NET (pour couvrir les frais + générer un vrai gain)
 9. ÉVITE les trades "timides" à faible conviction — si confiance < 65%, dis SKIP
 10. MONTANT OBLIGATOIRE: amount_eur doit toujours être ≤ cash disponible (${context.currentPortfolio.cash_eur.toFixed(2)}€). Un amount_eur > cash est INVALIDE.
+11. POUSSIÈRES INTERDITES: ne propose JAMAIS un SELL si current_value_eur < 5€ (minimum exchange Kraken/Coinbase). En dessous de 5€ dis SKIP — l'ordre serait rejeté ("volume minimum not met").
+12. VENTE INTERDITE SUR ACTIF NON DÉTENU: un SELL n'est valide QUE si le symbole figure dans PORTEFEUILLE ACTUEL avec current_value_eur ≥ 5€. Vendre un actif que tu ne détiens pas est IMPOSSIBLE (l'exchange rejette l'ordre). Si tu n'as pas la position → réponds HOLD ou SKIP, JAMAIS SELL. Pour un SELL: amount_eur = current_value_eur de la position (pas plus).
 
 Retourne un JSON avec tes décisions:
 {

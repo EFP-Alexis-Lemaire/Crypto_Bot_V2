@@ -22,6 +22,7 @@ import {
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision } from '@/lib/types';
+import { cronUnauthorized } from '@/lib/cron-auth';
 import { v4 as uuidv4 } from 'uuid';
 
 export const maxDuration = 60; // 60 seconds for Vercel
@@ -33,18 +34,26 @@ function firstVal(result: unknown, field: string): string | undefined {
 }
 
 export async function GET(request: Request) {
-  // Verify cron secret
-  const authHeader = request.headers.get('authorization');
-  if (
-    process.env.CRON_SECRET &&
-    authHeader !== `Bearer ${process.env.CRON_SECRET}`
-  ) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  // cron-job.org doit envoyer le header Authorization: Bearer <CRON_SECRET>
+  // (les crons natifs Vercel l'envoient automatiquement quand la var existe)
+  const unauthorized = cronUnauthorized(request);
+  if (unauthorized) return unauthorized;
 
   const cycleId = uuidv4();
-  // Use PROD DB when APP_ENV=production, UAT otherwise
-  const dbContext = process.env.APP_ENV === 'production' ? 'prod' : 'uat';
+  // DB cible : priorité au param explicite (?ctx=prod ou ?db=prod) puis header
+  // x-db-context (utile pour cron-job.org), sinon APP_ENV (Vercel crons natifs).
+  // Sans indication explicite sur l'URL de prod, on suppose PROD pour éviter
+  // d'écrire les cycles prod en UAT.
+  const url = new URL(request.url);
+  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
+  const headerCtx = request.headers.get('x-db-context');
+  const dbContext = (queryCtx === 'prod' || queryCtx === 'uat')
+    ? queryCtx
+    : (headerCtx === 'prod' || headerCtx === 'uat')
+      ? headerCtx
+      : process.env.APP_ENV === 'production'
+        ? 'prod'
+        : (url.hostname.includes('localhost') || url.hostname.includes('127.0.0.1') ? 'uat' : 'prod');
   const db = sqlForContext(dbContext);
   console.log(`[Bot Cycle ${cycleId}] Starting analysis on ${dbContext} DB...`);
 
@@ -124,31 +133,37 @@ export async function GET(request: Request) {
     const technicalIndicators: TechnicalIndicators[] = [];
     const topCoins = allMarketData.slice(0, 15);
 
+    // Un coin invalide (ex: trending "gram" délisté) ne doit jamais faire échouer le cycle
     await Promise.all(
       topCoins.map(async coin => {
-        const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ??
-          coin.symbol.toLowerCase();
-        const history = await getCoinHistory(coinId, 60);
-        const prices = history.map(h => h.price);
+        try {
+          const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ??
+            coin.symbol.toLowerCase();
+          const history = await getCoinHistory(coinId, 60);
+          const prices = history.map(h => h.price);
 
-        if (prices.length >= 26) {
-          const indicators = calculateTechnicalIndicators(prices);
-          technicalIndicators.push({ symbol: coin.symbol, ...indicators });
+          if (prices.length >= 26) {
+            const indicators = calculateTechnicalIndicators(prices);
+            technicalIndicators.push({ symbol: coin.symbol, ...indicators });
+          }
+        } catch (e) {
+          console.warn(`[Bot Cycle ${cycleId}] history skip ${coin.symbol}:`, String(e));
         }
       })
     );
 
-    // Get current portfolio
-    const portfolio = await getPortfolioSummary(allMarketData, undefined, dbContext);
-
-    // Check stop-loss / take-profit first
-    console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
-    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, undefined, dbContext);
-
-    // Sync from exchange if live mode
-    if (isLive) {
+    // Sync from exchange if live mode (live trader écrit en PROD : ne sync que si on est sur la DB prod)
+    if (isLive && dbContext === 'prod') {
       await syncPortfolioFromExchange('both');
     }
+
+    // Get current portfolio — on passe currentEnv explicitement pour ne pas
+    // relire trading_mode sur la mauvaise DB
+    const portfolio = await getPortfolioSummary(allMarketData, currentEnv, dbContext);
+
+    // Check stop-loss / take-profit first (le filtre dust < 5€ est dans checkStopLossAndTakeProfit)
+    console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
+    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, currentEnv, dbContext);
 
     // Track recently sold symbols to prevent immediate rebuy
     const recentlySoldResult = (await db`
@@ -163,12 +178,29 @@ export async function GET(request: Request) {
       const marketCoin = allMarketData.find(m => m.symbol === slAction.symbol);
       if (!marketCoin) continue;
 
+      const positionValue = portfolio.holdings.find(h => h.symbol === slAction.symbol)
+        ?.current_value_eur ?? 0;
+      // Filtre dust : ne jamais appeler l'exchange sous le minimum Kraken (~5€)
+      if (positionValue < 5) {
+        console.log(`[Bot Cycle ${cycleId}] Skipping SELL ${slAction.symbol} — dust ${positionValue.toFixed(2)}€ < 5€`);
+        await db`
+          INSERT INTO bot_decisions
+            (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, env)
+          VALUES (
+            ${cycleId}, ${slAction.symbol}, 'SKIP',
+            ${`Poussière ignorée: position ${positionValue.toFixed(2)}€ < 5€ minimum exchange. ${slAction.reason}`},
+            0, 0, 'dust-filter',
+            ${JSON.stringify({ price: marketCoin.price_eur })},
+            ${JSON.stringify({})}, ${currentEnv}
+          )
+        `;
+        continue;
+      }
+
       const slDecision: BotDecision = {
         symbol: slAction.symbol,
         action: 'SELL',
-        amount_eur:
-          (portfolio.holdings.find(h => h.symbol === slAction.symbol)
-            ?.current_value_eur ?? 0),
+        amount_eur: positionValue,
         reasoning: slAction.reason,
         confidence: 95,
         risk_score: 10,
@@ -177,17 +209,17 @@ export async function GET(request: Request) {
 
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
-        : await executePaperTrade(slDecision, marketCoin, eurUsdRate, undefined, dbContext);
+        : await executePaperTrade(slDecision, marketCoin, eurUsdRate, currentEnv, dbContext);
       await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive);
       // Log decision
       await db`
-        INSERT INTO bot_decisions 
-          (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators)
+        INSERT INTO bot_decisions
+          (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, env)
         VALUES (
           ${cycleId}, ${slAction.symbol}, 'SELL',
           ${slAction.reason}, 95, 10, 'stop-loss-trigger',
           ${JSON.stringify({ price: marketCoin.price_eur })},
-          ${JSON.stringify({})}
+          ${JSON.stringify({})}, ${currentEnv}
         )
       `;
     }
@@ -218,11 +250,11 @@ export async function GET(request: Request) {
     // Always log the cycle, even if no decisions
     if (decisions.length === 0) {
       await db`
-        INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+        INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
         VALUES (
           ${cycleId}, NULL, 'SKIP',
           ${`Aucune opportunité identifiée. Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label}). Aucun setup ne justifie les frais (~0.52% aller-retour). Portefeuille: ${portfolio.total_value_eur.toFixed(2)}€.`},
-          0, 0, 'gpt-4o'
+          0, 0, 'gpt-4o', ${currentEnv}
         )
       `;
     }
@@ -235,22 +267,22 @@ export async function GET(request: Request) {
       if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
         console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — sold within last 4h`);
         await db`
-          INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+          INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
           VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
             ${'Rachat bloqué: ' + decision.symbol + ' a été vendu dans les 4 dernières heures. Délai de cooldown respecté.'},
-            0, 0, 'cooldown-rule')
+            0, 0, 'cooldown-rule', ${currentEnv})
         `;
         continue;
       }
       if (decision.action === 'HOLD' || decision.action === 'SKIP') {
         // Log but don't execute
         await db`
-          INSERT INTO bot_decisions 
-            (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+          INSERT INTO bot_decisions
+            (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
           VALUES (
             ${cycleId}, ${decision.symbol}, ${decision.action},
             ${decision.reasoning}, ${decision.confidence}, ${decision.risk_score},
-            'gpt-4o'
+            'gpt-4o', ${currentEnv}
           )
         `;
         continue;
@@ -259,14 +291,40 @@ export async function GET(request: Request) {
       const marketCoin = allMarketData.find(m => m.symbol === decision.symbol);
       if (!marketCoin) continue;
 
+      // Garde-fou SELL : position réellement détenue, sinon SKIP silencieux
+      // (sans appel exchange ni alerte Telegram). Évite les SELL hallucinés
+      // par l'IA sur des actifs non détenus + cap au montant détenu.
+      if (decision.action === 'SELL') {
+        const held = portfolio.holdings.find(h => h.symbol === decision.symbol);
+        if (!held) {
+          console.log(`[Bot Cycle ${cycleId}] Skipping SELL ${decision.symbol} — no position held`);
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Vente impossible: aucune position ${decision.symbol} en portefeuille. ${decision.reasoning}`},
+              0, 0, 'no-position', ${currentEnv})`;
+          continue;
+        }
+        if (held.current_value_eur < 5) {
+          console.log(`[Bot Cycle ${cycleId}] Skipping SELL ${decision.symbol} — dust ${held.current_value_eur.toFixed(2)}€ < 5€`);
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Poussière ignorée: vente ${held.current_value_eur.toFixed(2)}€ < 5€ minimum exchange (Kraken). ${decision.reasoning}`},
+              0, 0, 'dust-filter', ${currentEnv})`;
+          continue;
+        }
+        if (decision.amount_eur > held.current_value_eur) {
+          decision.amount_eur = parseFloat(held.current_value_eur.toFixed(2));
+        }
+      }
+
       // Hard cap: never attempt a BUY with more than available cash
       if (decision.action === 'BUY') {
         const cashEur = portfolio.cash_eur;
         if (cashEur < 5) {
-          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used)
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
             VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
               ${`Cash insuffisant (${cashEur.toFixed(2)}€ < 5€ minimum). Trade annulé.`},
-              0, 0, 'cash-guard')`;
+              0, 0, 'cash-guard', ${currentEnv})`;
           continue;
         }
         const maxAllowed = parseFloat((cashEur * 0.80).toFixed(2));
@@ -277,7 +335,7 @@ export async function GET(request: Request) {
 
       const result = isLive
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
-        : await executePaperTrade(decision, marketCoin, eurUsdRate, undefined, dbContext);
+        : await executePaperTrade(decision, marketCoin, eurUsdRate, currentEnv, dbContext);
       executedTrades.push({ decision, result });
 
       // Log decision with full market data
@@ -291,8 +349,8 @@ export async function GET(request: Request) {
         .slice(0, 3);
 
       await db`
-        INSERT INTO bot_decisions 
-          (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, news_summary)
+        INSERT INTO bot_decisions
+          (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, news_summary, env)
         VALUES (
           ${cycleId}, ${decision.symbol}, ${decision.action},
           ${decision.reasoning}, ${decision.confidence}, ${decision.risk_score},
@@ -304,7 +362,7 @@ export async function GET(request: Request) {
             fear_greed: fearGreed.value,
           })},
           ${JSON.stringify(techIndicator ?? {})},
-          ${relevantNews.map(n => n.title).join(' | ')}
+          ${relevantNews.map(n => n.title).join(' | ')}, ${currentEnv}
         )
       `;
 
@@ -312,8 +370,8 @@ export async function GET(request: Request) {
     }
 
     // Save portfolio snapshot
-    const updatedPortfolio = await getPortfolioSummary(allMarketData, undefined, dbContext);
-    await savePortfolioSnapshot(updatedPortfolio, undefined, dbContext);
+    const updatedPortfolio = await getPortfolioSummary(allMarketData, currentEnv, dbContext);
+    await savePortfolioSnapshot(updatedPortfolio, currentEnv, dbContext);
 
     console.log(
       `[Bot Cycle ${cycleId}] Done. ${executedTrades.length} trades executed.`
@@ -321,6 +379,8 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       cycle_id: cycleId,
+      ctx: dbContext,
+      env: currentEnv,
       trades_executed: executedTrades.length,
       stop_loss_triggered: stopLossActions.length,
       portfolio_value_eur: updatedPortfolio.total_value_eur,

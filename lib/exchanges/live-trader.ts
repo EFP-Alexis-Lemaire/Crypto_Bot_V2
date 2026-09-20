@@ -22,6 +22,27 @@ function getPreferredExchange(symbol: string): 'kraken' | 'coinbase' | null {
   return null;
 }
 
+// Minimums exchange : en dessous, Kraken rejette avec
+// "Egeneral: Invalid arguments: volume minimum not met"
+export const MIN_SELL_EUR = 5;
+// Volumes minimums approximatifs par asset (sécurité, le notionnel € reste le garde principal)
+export const MIN_VOLUME_PER_SYMBOL: Record<string, number> = {
+  BTC: 0.0001, ETH: 0.002, SOL: 0.02, ADA: 5, DOT: 1, AVAX: 0.2,
+  LINK: 0.5, UNI: 0.5, AAVE: 0.05, LTC: 0.05, XRP: 10, MATIC: 5,
+  ARB: 2, OP: 2, NEAR: 1, ALGO: 10,
+};
+
+export function isDustSell(symbol: string, cryptoAmount: number, sellValueEur: number): string | null {
+  if (sellValueEur < MIN_SELL_EUR) {
+    return `Poussière ignorée: vente ${symbol} de ${sellValueEur.toFixed(2)}€ < ${MIN_SELL_EUR}€ minimum exchange`;
+  }
+  const minVol = MIN_VOLUME_PER_SYMBOL[symbol] ?? 0.0001;
+  if (cryptoAmount < minVol) {
+    return `Poussière ignorée: volume ${cryptoAmount.toFixed(8)} ${symbol} < minimum ${minVol}`;
+  }
+  return null;
+}
+
 export async function executeLiveTrade(
   decision: BotDecision,
   currentPrice: MarketData,
@@ -109,6 +130,12 @@ export async function executeLiveTrade(
       const PLATFORM_FEE_RATE = exchange === 'kraken' ? PLATFORM_FEE_RATE_KRAKEN : PLATFORM_FEE_RATE_COINBASE;
       const sellValue = Math.min(decision.amount_eur, holdingAmount * currentPrice.price_eur);
       const cryptoToSell = sellValue / currentPrice.price_eur;
+      // Garde-fou final juste avant l'appel API : ne jamais envoyer une poussière à Kraken/Coinbase
+      const dustReason = isDustSell(decision.symbol, cryptoToSell, sellValue);
+      if (dustReason) {
+        console.log(`[LiveTrader] ${dustReason}`);
+        return { success: false, message: dustReason };
+      }
       const fee = sellValue * PLATFORM_FEE_RATE;
       const eurReceived = sellValue - fee;
       let txid: string | undefined;

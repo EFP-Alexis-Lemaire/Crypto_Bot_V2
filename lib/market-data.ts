@@ -139,7 +139,13 @@ export async function getCoinHistory(
       price,
     }));
   } catch (error) {
-    console.error(`Error fetching history for ${coinId}:`, error);
+    // 404 = coin inconnu/délisté (ex: trending "gram") : normal, on skip sans spammer les logs.
+    // IMPORTANT : ne jamais logger l'objet d'erreur complet (il contient la clé API dans config.params).
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      console.warn(`[market-data] history: coin introuvable, skip (${coinId})`);
+    } else {
+      console.warn(`[market-data] history: échec pour ${coinId}:`, axios.isAxiosError(error) ? (error.message ?? error.code) : String(error));
+    }
     return [];
   }
 }

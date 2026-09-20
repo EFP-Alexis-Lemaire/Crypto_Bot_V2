@@ -69,6 +69,25 @@ export async function GET(request: Request) {
       }
     } catch { migrations.push('trading_mode auto-fix: skipped'); }
 
+    // 5c. Index unique requis par les upserts ON CONFLICT (symbol, env)
+    // (portfolio.ts + live-trader.ts). Sans lui : erreur 42P10 "no unique or
+    // exclusion constraint matching the ON CONFLICT specification" à chaque sync.
+    // D'abord dédupliquer (garder la ligne la plus récente par couple symbol/env),
+    // sinon la création de l'index échoue sur les DB existantes.
+    try {
+      await sql`
+        DELETE FROM portfolio a USING portfolio b
+        WHERE a.id < b.id
+        AND a.symbol = b.symbol
+        AND a.env = b.env
+      `;
+      migrations.push('portfolio: doublons (symbol, env) supprimés');
+    } catch { migrations.push('portfolio dedup (symbol, env): skipped'); }
+    try {
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS portfolio_symbol_env_uidx ON portfolio (symbol, env)`;
+      migrations.push('portfolio_symbol_env_uidx: index unique créé');
+    } catch { migrations.push('portfolio_symbol_env_uidx: skipped'); }
+
     // 6. Ensure EUR portfolio row exists for paper env — deduplicate if needed
     // First remove any duplicate EUR paper rows keeping only the one with highest amount
     try {

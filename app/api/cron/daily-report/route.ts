@@ -4,6 +4,7 @@ import { getMarketData, getFearGreedIndex } from '@/lib/market-data';
 import { getPortfolioSummary } from '@/lib/portfolio';
 import { sendDailyReport } from '@/lib/telegram';
 import { BotDecision } from '@/lib/types';
+import { cronUnauthorized } from '@/lib/cron-auth';
 import { WATCHLIST_COINS } from '@/lib/market-data';
 
 export const maxDuration = 30;
@@ -11,13 +12,8 @@ export const maxDuration = 30;
 type Row = Record<string, unknown>;
 
 export async function GET(request: Request) {
-  const authHeader = request.headers.get('authorization');
-  if (
-    process.env.CRON_SECRET &&
-    authHeader !== `Bearer ${process.env.CRON_SECRET}`
-  ) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const unauthorized = cronUnauthorized(request);
+  if (unauthorized) return unauthorized;
 
   try {
     const [marketData, fearGreedRaw] = await Promise.all([
