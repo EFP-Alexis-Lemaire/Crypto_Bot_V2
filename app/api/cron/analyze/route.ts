@@ -211,7 +211,7 @@ export async function GET(request: Request) {
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
         : await executePaperTrade(slDecision, marketCoin, eurUsdRate, currentEnv, dbContext);
-      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive);
+      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive, dbContext);
       // Log decision
       await db`
         INSERT INTO bot_decisions
@@ -413,7 +413,7 @@ export async function GET(request: Request) {
         )
       `;
 
-      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive);
+      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive, dbContext);
     }
 
     // Save portfolio snapshot

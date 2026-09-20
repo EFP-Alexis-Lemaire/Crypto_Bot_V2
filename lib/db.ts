@@ -168,7 +168,8 @@ export async function initializeDatabase() {
       ('stop_loss_pct', '8'),
       ('take_profit_pct', '15'),
       ('initial_portfolio_eur', '5000'),
-      ('is_active', 'true')
+      ('is_active', 'true'),
+      ('telegram_muted', 'false')
     ON CONFLICT (key) DO NOTHING
   `;
 

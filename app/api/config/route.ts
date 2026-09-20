@@ -35,6 +35,7 @@ export async function POST(request: Request) {
       'take_profit_pct',
       'is_active',
       'initial_portfolio_eur',
+      'telegram_muted',
     ];
 
     if (!allowedKeys.includes(key)) {

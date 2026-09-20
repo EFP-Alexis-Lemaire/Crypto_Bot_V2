@@ -1,11 +1,25 @@
 import axios from 'axios';
 import { PortfolioSummary, BotDecision } from './types';
+import { sqlForContext, DbContext } from './db';
 import { format } from 'date-fns';
 import { fr } from 'date-fns/locale';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-export async function sendTelegramMessage(message: string, isLiveMode?: boolean): Promise<void> {
+// Flag `telegram_muted` (table bot_config du contexte donné) : quand 'true',
+// les messages NON-live ([UAT/PAPER]) sont ignorés. Les alertes LIVE passent
+// toujours. Fail-open : en cas d'erreur de lecture, on envoie.
+export async function isTelegramMuted(ctx: DbContext = 'uat'): Promise<boolean> {
+  try {
+    const db = sqlForContext(ctx);
+    const rows = (await db`SELECT value FROM bot_config WHERE key = 'telegram_muted'`) as Array<{ value: string }>;
+    return rows[0]?.value === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export async function sendTelegramMessage(message: string, isLiveMode?: boolean, ctx?: DbContext): Promise<void> {
   if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
     console.log('[Telegram] Not configured, skipping message:', message.slice(0, 100));
     return;
@@ -13,6 +27,13 @@ export async function sendTelegramMessage(message: string, isLiveMode?: boolean)
 
   // isLiveMode passed explicitly — fallback to env var only if not provided
   const live = isLiveMode ?? (process.env.TRADING_MODE === 'live');
+
+  // Mute : silence les notifs non-live (UAT/paper) quand le flag est actif
+  if (!live && (await isTelegramMuted(ctx ?? 'uat'))) {
+    console.log('[Telegram] Muted (telegram_muted=true), skipping non-live message:', message.slice(0, 100));
+    return;
+  }
+
   const finalMessage = live ? message : `🧪 <b>[UAT/PAPER]</b>\n${message}`;
 
   try {
@@ -32,7 +53,8 @@ export async function sendDailyReport(
   tradesCount: number,
   fearGreed: { value: number; label: string },
   marketSentiment: string,
-  isLiveMode?: boolean
+  isLiveMode?: boolean,
+  ctx?: DbContext
 ): Promise<void> {
   const now = new Date();
   const dateStr = format(now, "EEEE d MMMM yyyy", { locale: fr });
@@ -101,7 +123,7 @@ Mode: ${(isLiveMode ?? process.env.TRADING_MODE === 'live') ? '🔴 LIVE TRADING
 ⏰ Prochain rapport: 18h00
   `.trim();
 
-  await sendTelegramMessage(message, isLiveMode);
+  await sendTelegramMessage(message, isLiveMode, ctx);
 }
 
 export async function sendTradeAlert(
@@ -109,7 +131,8 @@ export async function sendTradeAlert(
   executed: boolean,
   price_eur: number,
   message: string,
-  isLiveMode?: boolean
+  isLiveMode?: boolean,
+  ctx?: DbContext
 ): Promise<void> {
   const actionEmoji =
     decision.action === 'BUY' ? '🟢 ACHAT' : decision.action === 'SELL' ? '🔴 VENTE' : '⏸';
@@ -128,5 +151,5 @@ ${statusEmoji} <b>${actionEmoji} ${decision.symbol}</b>
 ${message ? `\n📝 ${message}` : ''}
   `.trim();
 
-  await sendTelegramMessage(alert, isLiveMode);
+  await sendTelegramMessage(alert, isLiveMode, ctx);
 }

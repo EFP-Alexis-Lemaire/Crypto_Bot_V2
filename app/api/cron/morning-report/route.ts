@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { sql } from '@/lib/db';
+import { sqlForContext, DbContext } from '@/lib/db';
 import { getMarketData, getFearGreedIndex, getEurUsdRate, getCryptoNews } from '@/lib/market-data';
 import { getPortfolioSummary } from '@/lib/portfolio';
 import { WATCHLIST_COINS } from '@/lib/market-data';
@@ -130,10 +130,28 @@ Génère un rapport JSON structuré et précis:
 }
 
 export async function GET(request: Request) {
-  const unauthorized = cronUnauthorized(request);
+  const url = new URL(request.url);
+  // Déclenchement manuel navigateur : ?secret=<CRON_SECRET> (même niveau que le Bearer)
+  const secret = process.env.CRON_SECRET;
+  const authorizedByQuery = Boolean(secret) && url.searchParams.get('secret') === secret;
+  const unauthorized = authorizedByQuery ? null : cronUnauthorized(request);
   if (unauthorized) return unauthorized;
 
+  // Contexte DB : ?ctx=prod (ou ?db=) > header x-db-context > APP_ENV, défaut UAT
+  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
+  const headerCtx = request.headers.get('x-db-context');
+  const dbContext: DbContext = (queryCtx === 'prod' || queryCtx === 'uat')
+    ? queryCtx
+    : (headerCtx === 'prod' || headerCtx === 'uat')
+      ? headerCtx
+      : process.env.APP_ENV === 'production' ? 'prod' : 'uat';
+  const db = sqlForContext(dbContext);
+
   try {
+    const modeRows = (await db`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
+    const isLive = modeRows[0]?.value === 'live';
+    const env = isLive ? 'live' : 'paper';
+
     const [marketData, fearGreedRaw, eurUsd, news] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getFearGreedIndex(),
@@ -142,11 +160,11 @@ export async function GET(request: Request) {
     ]);
     const fearGreed = fearGreedRaw as { value: number; label: string };
 
-    const portfolio = await getPortfolioSummary(marketData);
+    const portfolio = await getPortfolioSummary(marketData, env, dbContext);
     const report = await generateMorningReport(marketData, fearGreed, eurUsd, news, portfolio);
 
     // Save to DB
-    await sql`
+    await db`
       INSERT INTO morning_reports (report_date, data, created_at)
       VALUES (CURRENT_DATE, ${JSON.stringify(report)}, NOW())
       ON CONFLICT (report_date) DO UPDATE SET data = ${JSON.stringify(report)}, created_at = NOW()
@@ -188,9 +206,9 @@ ${report.advice}
 ⏰ Prochain rapport: 18h00
     `.trim();
 
-    await sendTelegramMessage(telegramMsg);
+    await sendTelegramMessage(telegramMsg, isLive, dbContext);
 
-    return NextResponse.json({ success: true, report });
+    return NextResponse.json({ success: true, report, ctx: dbContext, env });
   } catch (error) {
     console.error('Morning report error:', error);
     return NextResponse.json({ error: String(error) }, { status: 500 });

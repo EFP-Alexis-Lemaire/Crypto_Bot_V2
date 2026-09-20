@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro } from 'lucide-react';
+import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro, Bell, BellOff } from 'lucide-react';
 
 interface Config {
   risk_level: string;
@@ -12,6 +12,7 @@ interface Config {
   take_profit_pct: string;
   max_position_size_pct: string;
   initial_portfolio_eur: string;
+  telegram_muted?: string;
 }
 
 interface Props {
@@ -81,6 +82,7 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     take_profit_pct: config.take_profit_pct ?? '15',
     max_position_size_pct: config.max_position_size_pct ?? '20',
     initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
+    telegram_muted: config.telegram_muted ?? 'false',
   });
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -95,10 +97,12 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
       take_profit_pct: config.take_profit_pct ?? '15',
       max_position_size_pct: config.max_position_size_pct ?? '20',
       initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
+      telegram_muted: config.telegram_muted ?? 'false',
     });
   }, [config]);
 
   const isActive = localConfig.is_active === 'true';
+  const isMuted = (localConfig.telegram_muted ?? 'false') === 'true';
 
   const updateConfig = useCallback(async (key: string, value: string) => {
     try {
@@ -124,6 +128,16 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     setLocalConfig(prev => ({ ...prev, is_active: newVal }));
     await updateConfig('is_active', newVal);
     setMessage(isActive ? 'Bot mis en pause' : 'Bot active');
+    setTimeout(() => setMessage(''), 3000);
+  };
+
+  // Mute/unmute des notifs Telegram non-live ([UAT/PAPER]) pour le contexte affiché.
+  // Les alertes LIVE passent toujours.
+  const toggleMute = async () => {
+    const newVal = isMuted ? 'false' : 'true';
+    setLocalConfig(prev => ({ ...prev, telegram_muted: newVal }));
+    await updateConfig('telegram_muted', newVal);
+    setMessage(isMuted ? 'Notifications réactivées' : 'Notifications UAT/paper en pause');
     setTimeout(() => setMessage(''), 3000);
   };
 
@@ -156,7 +170,10 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     setLoading(true);
     setMessage('Envoi du rapport...');
     try {
-      const res = await fetch('/api/bot/report', { method: 'POST' });
+      const res = await fetch('/api/bot/report', {
+        method: 'POST',
+        headers: { 'x-db-context': dbContext },
+      });
       if (!res.ok) {
         const data = await res.json();
         setMessage(`Erreur: ${data.error ?? 'inconnue'}`);
@@ -206,9 +223,18 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
           </div>
           <span className="text-white font-semibold text-sm">Controles du Bot</span>
         </div>
-        <div className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border ${isActive ? 'bg-green-500/10 text-green-400 border-green-500/30' : 'bg-gray-800 text-gray-500 border-gray-700'}`}>
-          <div className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
-          {isActive ? 'Actif' : 'En pause'}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={toggleMute}
+            title={isMuted ? 'Réactiver les notifications' : 'Mettre en pause les notifications non-live'}
+            className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border transition-all ${isMuted ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30 hover:bg-yellow-500/20' : 'bg-gray-800 text-gray-400 border-gray-700 hover:border-gray-600 hover:text-gray-200'}`}
+          >
+            {isMuted ? <><BellOff className="w-3.5 h-3.5" /> Muet</> : <><Bell className="w-3.5 h-3.5" /> Notifs</>}
+          </button>
+          <div className={`flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border ${isActive ? 'bg-green-500/10 text-green-400 border-green-500/30' : 'bg-gray-800 text-gray-500 border-gray-700'}`}>
+            <div className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-green-400 animate-pulse' : 'bg-gray-600'}`} />
+            {isActive ? 'Actif' : 'En pause'}
+          </div>
         </div>
       </div>
 
