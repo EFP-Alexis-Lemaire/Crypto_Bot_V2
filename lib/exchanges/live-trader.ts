@@ -8,8 +8,23 @@ import {
 import {
   placeCoinbaseOrder,
   getCoinbaseBalance,
+  isCoinbaseProductTradable,
   SYMBOL_TO_COINBASE_PRODUCT,
 } from './coinbase';
+
+// Message d'erreur compact : évite de déverser l'objet Axios entier dans les logs
+// (extrait le message API, ex. "Invalid product_id", quand il existe)
+export function formatLiveError(error: unknown): string {
+  const responseData = (error as { response?: { data?: unknown } })?.response?.data;
+  if (responseData && typeof responseData === 'object') {
+    const d = responseData as Record<string, unknown>;
+    const msg = [d.message ?? d.error, d.error_details]
+      .filter(v => typeof v === 'string' && (v as string).length > 0)
+      .join(' — ');
+    if (msg) return msg;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
 
 type Row = Record<string, unknown>;
 
@@ -54,8 +69,16 @@ export async function chooseExchangeForBuy(
     return { exchange: null, krakenCash: 0, coinbaseCash: 0, reason: `${symbol} non disponible sur Kraken ou Coinbase` };
   }
   const { kraken, coinbase } = await getExchangeCash();
+  // Dispo produit Coinbase (varie selon compte/région : ex. NEAR-EUR peut être rejeté)
+  let coinbaseProductOk = false;
+  let coinbaseProductReason = '';
+  if (onCoinbase) {
+    const productId = SYMBOL_TO_COINBASE_PRODUCT[symbol];
+    coinbaseProductOk = await isCoinbaseProductTradable(productId);
+    if (!coinbaseProductOk) coinbaseProductReason = `${productId} non listé/tradable sur Coinbase (compte/région)`;
+  }
   const krakenFits = onKraken && kraken >= 5 && amountEur <= kraken * 0.95;
-  const coinbaseFits = onCoinbase && coinbase >= 5 && amountEur <= coinbase * 0.95;
+  const coinbaseFits = onCoinbase && coinbaseProductOk && coinbase >= 5 && amountEur <= coinbase * 0.95;
   if (krakenFits) {
     return { exchange: 'kraken', krakenCash: kraken, coinbaseCash: coinbase, reason: `Kraken peut couvrir ${amountEur.toFixed(2)}€ (solde ${kraken.toFixed(2)}€)` };
   }
@@ -65,9 +88,15 @@ export async function chooseExchangeForBuy(
       : `Symbol non listé sur Kraken -> Coinbase`;
     return { exchange: 'coinbase', krakenCash: kraken, coinbaseCash: coinbase, reason: `${why} (solde ${coinbase.toFixed(2)}€)` };
   }
+  const blocks: string[] = [];
+  if (onKraken) blocks.push(`Kraken: ${kraken.toFixed(2)}€ (insuffisant)`);
+  else blocks.push('Kraken: symbole non listé');
+  if (!onCoinbase) blocks.push('Coinbase: symbole non listé');
+  else if (!coinbaseProductOk) blocks.push(`Coinbase: ${coinbaseProductReason}`);
+  else blocks.push(`Coinbase: ${coinbase.toFixed(2)}€ (insuffisant)`);
   return {
     exchange: null, krakenCash: kraken, coinbaseCash: coinbase,
-    reason: `Aucun exchange ne peut couvrir ${amountEur.toFixed(2)}€ en gardant 5% de réserve (Kraken: ${kraken.toFixed(2)}€, Coinbase: ${coinbase.toFixed(2)}€)`,
+    reason: `Achat ${symbol} ${amountEur.toFixed(2)}€ impossible — ${blocks.join(' ; ')}`,
   };
 }
 
@@ -228,8 +257,9 @@ export async function executeLiveTrade(
 
     return { success: true, message: `Action ${decision.action} — pas d'exécution` };
   } catch (error) {
-    console.error(`[LiveTrader] Error:`, error);
-    return { success: false, message: `Erreur: ${error instanceof Error ? error.message : String(error)}` };
+    const msg = formatLiveError(error);
+    console.error(`[LiveTrader] Error ${decision.action} ${decision.symbol}:`, msg);
+    return { success: false, message: `Erreur ${decision.symbol}: ${msg}` };
   }
 }
 

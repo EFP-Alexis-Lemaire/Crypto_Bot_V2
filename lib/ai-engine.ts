@@ -26,6 +26,9 @@ interface AnalysisContext {
     // Si absent (paper), cash_eur fait foi.
     cash_kraken_eur?: number;
     cash_coinbase_eur?: number;
+    // Symboles impossibles à acheter sur Coinbase (mapping absent ou produit
+    // non listé sur le compte/région) : seul le cash Kraken compte pour eux.
+    unavailable_on_coinbase?: string[];
     holdings: Array<{
       symbol: string;
       amount: number;
@@ -135,11 +138,18 @@ export async function analyzeMarketWithAI(
       : cashAvailable;
     const capBase = Math.min(cashAvailable, maxSingleExchangeCash);
 
+    const krakenOnly = new Set(context.currentPortfolio.unavailable_on_coinbase ?? []);
+    const krakenCash = context.currentPortfolio.cash_kraken_eur;
+
     const decisions: BotDecision[] = (parsed.decisions ?? [])
       .map((d: BotDecision) => {
-        // Hard cap: amount_eur can never exceed the cash of a single exchange
-        if (d.action === 'BUY' && d.amount_eur > capBase) {
-          d.amount_eur = parseFloat((capBase * 0.80).toFixed(2));
+        // Hard cap: amount_eur can never exceed the cash of a single exchange.
+        // Symboles non-tradables sur Coinbase -> seul le cash Kraken compte.
+        const symbolCap = d.action === 'BUY' && krakenOnly.has(d.symbol) && krakenCash !== undefined
+          ? krakenCash
+          : capBase;
+        if (d.action === 'BUY' && d.amount_eur > symbolCap) {
+          d.amount_eur = parseFloat((symbolCap * 0.80).toFixed(2));
         }
         // If after capping the amount is below minimum, convert to SKIP
         if (d.action === 'BUY' && d.amount_eur < 5) {
@@ -246,7 +256,10 @@ Minimum exchange: 5€ par ordre
 - Si cash entre 50€ et 300€ → utilise max 85% du cash (soit max ${(Math.min(context.currentPortfolio.cash_eur, context.currentPortfolio.cash_kraken_eur !== undefined ? Math.max(context.currentPortfolio.cash_kraken_eur, context.currentPortfolio.cash_coinbase_eur ?? 0) : context.currentPortfolio.cash_eur) * 0.85).toFixed(2)}€)
 - Si cash > 300€ → montant selon la règle de max position (${(context.currentPortfolio.total_value_eur * riskConfig.max_position_size_pct / 100).toFixed(0)}€ max)
 - EXEMPLE: si cash = 8€ → amount_eur doit être entre 5€ et 6.4€, PAS 500€ ni 1000€${context.currentPortfolio.cash_kraken_eur !== undefined ? `
-- EXEMPLE MULTI-EXCHANGE: Kraken 100€ + Coinbase 500€ → amount_eur max = 400€ (80% de 500€), JAMAIS 480€ (80% du total 600€)` : ''}
+- EXEMPLE MULTI-EXCHANGE: Kraken 100€ + Coinbase 500€ → amount_eur max = 400€ (80% de 500€), JAMAIS 480€ (80% du total 600€)` : ''}${(context.currentPortfolio.unavailable_on_coinbase ?? []).length > 0 ? `
+⚠️ SYMBOLES NON TRADABLES SUR COINBASE (compte/région) : ${context.currentPortfolio.unavailable_on_coinbase!.join(', ')}
+→ Un achat de ces symboles ne peut être payé QUE par Kraken (${(context.currentPortfolio.cash_kraken_eur ?? 0).toFixed(2)}€ dispo).
+→ Si le montant dépasse 80% du cash Kraken → SKIP (Coinbase rejettera l'ordre avec "Invalid product_id").` : ''}
 
 === RÉÉQUILIBRAGE DU PORTEFEUILLE ===
 Si le portefeuille contient des crypto avec pnl_percent proche de 0 ou négatif et que tu veux acheter autre chose:

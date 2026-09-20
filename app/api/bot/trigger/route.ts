@@ -8,6 +8,7 @@ import {
 import { analyzeMarketWithAI } from '@/lib/ai-engine';
 import { getPortfolioSummary, executePaperTrade, savePortfolioSnapshot, checkStopLossAndTakeProfit } from '@/lib/portfolio';
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
+import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/lib/exchanges/coinbase';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -156,6 +157,15 @@ export async function POST(request: Request) {
           ${JSON.stringify({ price: marketCoin.price_eur })}, ${JSON.stringify({})}, ${currentEnv})`;
     }
 
+    // Symboles non-tradables sur Coinbase : dimensionnés au cash Kraken seul
+    let untradableCB: string[] = [];
+    if (isLive) {
+      try {
+        untradableCB = await getSymbolsUntradableOnCoinbase(Object.keys(SYMBOL_TO_COINBASE_PRODUCT));
+        if (untradableCB.length > 0) console.log(`[Trigger ${cycleId}] Untradable on Coinbase: ${untradableCB.join(', ')}`);
+      } catch { /* fail-open */ }
+    }
+
     const decisions = await analyzeMarketWithAI({
       marketData: allMarketData, technicalIndicators, news, fearGreedIndex: fearGreed, defiTVL,
       currentPortfolio: {
@@ -163,6 +173,7 @@ export async function POST(request: Request) {
         ...(isLive && portfolio.cash_by_exchange ? {
           cash_kraken_eur: portfolio.cash_by_exchange.kraken,
           cash_coinbase_eur: portfolio.cash_by_exchange.coinbase,
+          unavailable_on_coinbase: untradableCB,
         } : {}),
         holdings: portfolio.holdings.map(h => ({ symbol: h.symbol, amount: h.amount, current_value_eur: h.current_value_eur, pnl_percent: h.pnl_percent })),
       },
@@ -222,9 +233,12 @@ export async function POST(request: Request) {
       }
 
       // Hard cap: en live, un BUY est payé par UN SEUL exchange -> cap à 80%
-      // du max des deux soldes (jamais du total consolidé). En paper, cap au cash.
+      // du max des deux soldes (jamais du total consolidé). Symboles non-tradables
+      // sur Coinbase -> cash Kraken seul. En paper, cap au cash.
       if (decision.action === 'BUY') {
-        const capBase = isLive ? Math.max(krakenCashMem, coinbaseCashMem) : portfolio.cash_eur;
+        const capBase = isLive
+          ? (untradableCB.includes(decision.symbol) ? krakenCashMem : Math.max(krakenCashMem, coinbaseCashMem))
+          : portfolio.cash_eur;
         if (capBase < 5) {
           await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
             VALUES (${cycleId}, ${decision.symbol}, 'SKIP',

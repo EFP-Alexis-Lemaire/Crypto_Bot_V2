@@ -119,6 +119,17 @@ export async function getCoinbaseBalance(): Promise<Record<string, number>> {
   return balances;
 }
 
+function formatCoinbaseApiError(data: unknown): string {
+  if (data && typeof data === 'object') {
+    const d = data as Record<string, unknown>;
+    const parts = [d.message ?? d.error, d.error_details]
+      .filter(v => typeof v === 'string' && (v as string).length > 0) as string[];
+    if (parts.length > 0) return parts.join(' — ');
+  }
+  if (typeof data === 'string' && data.length > 0) return data;
+  return 'Unknown error';
+}
+
 export async function placeCoinbaseOrder(
   productId: string,
   side: 'BUY' | 'SELL',
@@ -131,23 +142,89 @@ export async function placeCoinbaseOrder(
     ? { market_market_ioc: { quote_size: quoteSize } }
     : { market_market_ioc: { base_size: baseSize } };
 
-  const result = await coinbaseRequest<{
+  let result: {
     success: boolean;
     order_id: string;
     success_response: { order_id: string; product_id: string; status: string };
     error_response?: { error: string; message: string };
-  }>('POST', '/orders', {
-    client_order_id: clientOrderId,
-    product_id: productId,
-    side,
-    order_configuration: orderConfig,
-  });
+  };
+  try {
+    result = await coinbaseRequest<{
+      success: boolean;
+      order_id: string;
+      success_response: { order_id: string; product_id: string; status: string };
+      error_response?: { error: string; message: string };
+    }>('POST', '/orders', {
+      client_order_id: clientOrderId,
+      product_id: productId,
+      side,
+      order_configuration: orderConfig,
+    });
+  } catch (e) {
+    // Axios rejette sur les HTTP 4xx/5xx : extraire le message Coinbase
+    // (ex: "Invalid product_id") au lieu de "Request failed with status code 400"
+    const responseData = (e as { response?: { data?: unknown } })?.response?.data;
+    throw new Error(`Coinbase order failed: ${formatCoinbaseApiError(responseData)}`);
+  }
 
   if (!result.success || result.error_response) {
     throw new Error(`Coinbase order failed: ${result.error_response?.message ?? 'Unknown error'}`);
   }
 
   return result.success_response;
+}
+
+// Cache des produits réellement tradables sur le compte (la dispo varie
+// selon région/compte : ex. NEAR-EUR peut répondre "Invalid product_id").
+// TTL 1h, fail-open : si la liste est inaccessible, on tente quand même l'ordre.
+let _productsCache: { ids: Set<string>; fetchedAt: number } | null = null;
+const PRODUCTS_TTL_MS = 60 * 60 * 1000;
+
+export async function getCoinbaseProductIds(): Promise<Set<string>> {
+  if (_productsCache && Date.now() - _productsCache.fetchedAt < PRODUCTS_TTL_MS) {
+    return _productsCache.ids;
+  }
+  const ids = new Set<string>();
+  const limit = 250;
+  let offset = 0;
+  for (;;) {
+    const result = await coinbaseRequest<{
+      products: Array<{ product_id: string; status?: string }>;
+    }>('GET', `/products?limit=${limit}&offset=${offset}`);
+    const products = result.products ?? [];
+    for (const p of products) {
+      // N'exclure que les statuts explicitement non-tradables au marché
+      if (p.status && ['offline', 'delist', 'cancel_only'].includes(p.status)) continue;
+      ids.add(p.product_id);
+    }
+    if (products.length < limit) break;
+    offset += limit;
+  }
+  _productsCache = { ids, fetchedAt: Date.now() };
+  return ids;
+}
+
+export async function isCoinbaseProductTradable(productId: string): Promise<boolean> {
+  try {
+    return (await getCoinbaseProductIds()).has(productId);
+  } catch {
+    return true; // fail-open : vérification impossible -> on tente l'ordre
+  }
+}
+
+// Parmi les symboles gérés par le bot, lesquels ne sont PAS tradables sur
+// Coinbase (mapping absent OU produit non listé sur le compte) ?
+export async function getSymbolsUntradableOnCoinbase(symbols: string[]): Promise<string[]> {
+  let tradable: Set<string> | null = null;
+  try {
+    tradable = await getCoinbaseProductIds();
+  } catch {
+    return symbols.filter(s => !SYMBOL_TO_COINBASE_PRODUCT[s]); // repli : mapping seul
+  }
+  return symbols.filter(s => {
+    const productId = SYMBOL_TO_COINBASE_PRODUCT[s];
+    return !productId || !tradable!.has(productId);
+  });
 }
 
 export async function getCoinbaseTicker(productId: string): Promise<{
