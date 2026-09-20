@@ -128,7 +128,29 @@ export async function executeLiveTrade(
       const cryptoAmount = (actualAmount - fee) / currentPrice.price_eur;
       await db`INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (${decision.symbol}, 'BUY', ${cryptoAmount}, ${currentPrice.price_eur}, ${currentPrice.price_usd}, ${eurUsdRate}, ${actualAmount}, ${fee}, 'live', ${decision.reasoning}, ${decision.confidence}, 'live')`;
-      await syncPortfolioFromExchange(exchange);
+
+      // Avg d'achat AVANT le sync (le sync écrase les montants depuis l'exchange)
+      const prevRows = (await db`SELECT amount, avg_buy_price_eur FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'`) as Row[];
+      const prevAvg = prevRows.length > 0 ? parseFloat(String(prevRows[0].avg_buy_price_eur ?? 0)) : 0;
+
+      // Sync BOTH : un sync mono-exchange supprimerait de la DB les positions
+      // détenues sur l'autre exchange (la suppression se base sur les symboles absents)
+      await syncPortfolioFromExchange('both');
+
+      // Prix moyen pondéré (le coût réel inclut les frais : actualAmount).
+      // Si l'ancien avg est inconnu (0), on prend le coût unitaire du nouveau lot
+      // plutôt que de diluer avec 0.
+      const syncedRows = (await db`SELECT amount FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'`) as Row[];
+      const syncedAmount = syncedRows.length > 0 ? parseFloat(String(syncedRows[0].amount ?? 0)) : 0;
+      if (syncedAmount > 0.000001) {
+        const baseAmount = Math.max(0, syncedAmount - cryptoAmount);
+        const newAvg = baseAmount > 0.000001 && prevAvg > 0
+          ? (baseAmount * prevAvg + actualAmount) / syncedAmount
+          : actualAmount / Math.max(cryptoAmount, 1e-12);
+        if (newAvg > 0) {
+          await db`UPDATE portfolio SET avg_buy_price_eur = ${newAvg}, updated_at = NOW() WHERE symbol = ${decision.symbol} AND env = 'live'`;
+        }
+      }
       return { success: true, message: `[LIVE] Acheté ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€ sur ${exchange} (${routing.reason})`, txid, exchange };
     }
 
@@ -198,7 +220,9 @@ export async function executeLiveTrade(
 
       await db`INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
         VALUES (${decision.symbol}, 'SELL', ${cryptoToSell}, ${currentPrice.price_eur}, ${currentPrice.price_usd}, ${eurUsdRate}, ${eurReceived}, ${fee}, 'live', ${decision.reasoning}, ${decision.confidence}, 'live')`;
-      await syncPortfolioFromExchange(exchange);
+      // Sync BOTH : un sync mono-exchange supprimerait de la DB les positions
+      // détenues sur l'autre exchange (l'avg d'achat, lui, ne change pas à la vente)
+      await syncPortfolioFromExchange('both');
       return { success: true, message: `[LIVE] Vendu ${cryptoToSell.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€ sur ${exchange}`, txid };
     }
 
