@@ -7,7 +7,9 @@ import { sqlForContext, getDbContext } from '@/lib/db';
  * Call /api/migrate with header X-DB-Context: prod to migrate the prod DB.
  */
 export async function GET(request: Request) {
-  const ctx = getDbContext(request);
+  const url = new URL(request.url);
+  const q = url.searchParams.get('ctx') ?? url.searchParams.get('db');
+  const ctx = (q === 'uat' || q === 'prod') ? q : getDbContext(request);
   const sql = sqlForContext(ctx);
   try {
     const migrations: string[] = [];
@@ -110,6 +112,12 @@ export async function GET(request: Request) {
       WHERE NOT EXISTS (SELECT 1 FROM portfolio WHERE symbol = 'EUR' AND env = 'paper')
     `;
     migrations.push('paper EUR portfolio row ensured');
+
+    // 7. portfolio.partial_tp_taken : flag "TP partiel 50% déjà pris" (take-profits par paliers)
+    try {
+      await sql`ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS partial_tp_taken BOOLEAN NOT NULL DEFAULT FALSE`;
+      migrations.push('portfolio.partial_tp_taken: colonne créée');
+    } catch { migrations.push('portfolio.partial_tp_taken: skipped'); }
 
     // Return current state for verification
     const config = (await sql`SELECT key, value FROM bot_config ORDER BY key`) as Array<{ key: string; value: string }>;

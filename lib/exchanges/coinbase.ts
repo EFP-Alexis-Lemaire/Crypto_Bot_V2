@@ -130,6 +130,30 @@ function formatCoinbaseApiError(data: unknown): string {
   return 'Unknown error';
 }
 
+// Incrément de quantité par produit (ex: UNI-EUR n'accepte pas 8 décimales).
+// Lu sur /products/{id} (base_increment), cache 1h, défaut 6 décimales.
+const _specCache = new Map<string, { inc: string; at: number }>();
+
+export async function formatCoinbaseBaseSize(productId: string, amount: string): Promise<string> {
+  let inc = '0.000001';
+  try {
+    const now = Date.now();
+    const cached = _specCache.get(productId);
+    if (cached && now - cached.at < PRODUCTS_TTL_MS) {
+      inc = cached.inc;
+    } else {
+      const spec = await coinbaseRequest<{ base_increment?: string }>('GET', `/products/${productId}`);
+      if (spec.base_increment) inc = spec.base_increment;
+      _specCache.set(productId, { inc, at: now });
+    }
+  } catch { /* défaut */ }
+  const frac = inc.includes('.') ? inc.split('.')[1].replace(/0+$/, '') : '';
+  const decimals = frac.length;
+  const factor = 10 ** decimals;
+  const floored = Math.floor(parseFloat(amount) * factor) / factor;
+  return floored.toFixed(decimals);
+}
+
 export async function placeCoinbaseOrder(
   productId: string,
   side: 'BUY' | 'SELL',
@@ -137,6 +161,15 @@ export async function placeCoinbaseOrder(
   baseSize?: string
 ): Promise<{ order_id: string; product_id: string; status: string }> {
   const clientOrderId = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Les tailles en crypto doivent respecter l'incrément du produit,
+  // sinon Coinbase rejette avec "Too many decimals in order amount"
+  if (side === 'SELL' && baseSize) {
+    baseSize = await formatCoinbaseBaseSize(productId, baseSize);
+    if (parseFloat(baseSize) <= 0) {
+      throw new Error(`Coinbase order failed: montant trop petit après arrondi à l'incrément (${productId})`);
+    }
+  }
 
   const orderConfig = side === 'BUY'
     ? { market_market_ioc: { quote_size: quoteSize } }

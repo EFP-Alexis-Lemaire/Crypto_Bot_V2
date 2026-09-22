@@ -12,6 +12,7 @@ import {
   BarChart2,
 } from 'lucide-react';
 import PortfolioChart from '@/components/PortfolioChart';
+import PerformanceTable, { SymbolPerformance } from '@/components/PerformanceTable';
 import HoldingsPieChart from '@/components/HoldingsPieChart';
 import DecisionCard from '@/components/DecisionCard';
 import MarketTable from '@/components/MarketTable';
@@ -95,6 +96,8 @@ export default function Dashboard() {
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [morningReport, setMorningReport] = useState<Record<string, unknown> | null>(null);
   const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
+  const [performance, setPerformance] = useState<SymbolPerformance[]>([]);
+  const [perfTotals, setPerfTotals] = useState<{ realized_eur: number; unrealized_eur: number; fees_eur: number } | null>(null);
   const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
     // Default to PROD when running on production Vercel deployment
     if (typeof window !== 'undefined') {
@@ -127,7 +130,7 @@ export default function Dashboard() {
   const fetchAll = useCallback(async () => {
     const dbHeaders = { 'x-db-context': dbContext };
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, perfRes] =
         await Promise.all([
           fetch('/api/portfolio', { headers: dbHeaders }),
           fetch('/api/decisions?limit=20', { headers: dbHeaders }),
@@ -137,6 +140,7 @@ export default function Dashboard() {
           fetch('/api/cycles?limit=30', { headers: dbHeaders }),
           fetch('/api/morning-report', { headers: dbHeaders }),
           fetch('/api/ai-costs', { headers: dbHeaders }),
+          fetch('/api/performance', { headers: dbHeaders }),
         ]);
 
       if (portfolioRes.ok) {
@@ -182,6 +186,12 @@ export default function Dashboard() {
         setAiCosts(data.costs ?? null);
       }
 
+      if (perfRes.ok) {
+        const data = await perfRes.json();
+        setPerformance(data.performance ?? []);
+        setPerfTotals(data.totals ?? null);
+      }
+
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
     } catch (error) {
       console.error('Fetch error:', error);
@@ -221,6 +231,11 @@ export default function Dashboard() {
       : fearGreed.value < 75
       ? 'text-green-400'
       : 'text-emerald-400';
+
+  // Capital investi : référence ajustable via les boutons +/− du panneau Contrôles
+  const invested = parseFloat(config.initial_portfolio_eur ?? '5000') || 5000;
+  const displayPnl = (portfolio?.total_value_eur ?? invested) - invested;
+  const displayPnlPct = invested > 0 ? (displayPnl / invested) * 100 : 0;
 
   const tabs: { key: TabKey; label: string; icon: React.ElementType }[] = [
     { key: 'overview', label: 'Vue d\'ensemble', icon: BarChart2 },
@@ -355,30 +370,26 @@ export default function Dashboard() {
 
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
                 <div className="flex items-center gap-2 mb-3">
-                  {(portfolio?.pnl_eur ?? 0) >= 0 ? (
+                  {displayPnl >= 0 ? (
                     <TrendingUp className="w-4 h-4 text-green-400" />
                   ) : (
                     <TrendingDown className="w-4 h-4 text-red-400" />
                   )}
-                  <span className="text-gray-400 text-xs">P&L Total</span>
+                  <span className="text-gray-400 text-xs">P&L net</span>
                 </div>
                 <div
                   className={`text-2xl font-bold ${
-                    (portfolio?.pnl_eur ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                    displayPnl >= 0 ? 'text-green-400' : 'text-red-400'
                   }`}
                 >
-                  {portfolio?.pnl_eur !== undefined
-                    ? `${portfolio.pnl_eur >= 0 ? '+' : ''}${portfolio.pnl_eur.toFixed(2)}€`
-                    : '—'}
+                  {`${displayPnl >= 0 ? '+' : ''}${displayPnl.toFixed(2)}€`}
                 </div>
                 <div
                   className={`text-xs mt-1 ${
-                    (portfolio?.pnl_percent ?? 0) >= 0 ? 'text-green-400/70' : 'text-red-400/70'
+                    displayPnlPct >= 0 ? 'text-green-400/70' : 'text-red-400/70'
                   }`}
                 >
-                  {portfolio?.pnl_percent !== undefined
-                    ? `${portfolio.pnl_percent >= 0 ? '+' : ''}${portfolio.pnl_percent.toFixed(2)}%`
-                    : '—'}
+                  {`${displayPnlPct >= 0 ? '+' : ''}${displayPnlPct.toFixed(2)}% vs investi`}
                 </div>
               </div>
 
@@ -397,12 +408,14 @@ export default function Dashboard() {
 
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
                 <div className="flex items-center gap-2 mb-3">
-                  <Bot className="w-4 h-4 text-yellow-400" />
-                  <span className="text-gray-400 text-xs">Trades Total</span>
+                  <Wallet className="w-4 h-4 text-yellow-400" />
+                  <span className="text-gray-400 text-xs">Investi</span>
                 </div>
-                <div className="text-2xl font-bold text-white">{trades.length}</div>
+                <div className="text-2xl font-bold text-white">
+                  {invested.toFixed(2)}€
+                </div>
                 <div className="text-gray-500 text-xs mt-1">
-                  Décisions IA: {decisions.length}
+                  Capital de référence
                 </div>
               </div>
             </div>
@@ -416,8 +429,8 @@ export default function Dashboard() {
                 </h3>
                 <PortfolioChart
                   snapshots={snapshots}
-                  initialValue={(parseFloat(config.initial_portfolio_eur ?? '5000') || 5000)}
-                  key={config.initial_portfolio_eur ?? '5000'}
+                  initialValue={invested}
+                  key={invested}
                   currentValue={portfolio?.total_value_eur}
                   currentCash={portfolio?.cash_eur}
                   currentCrypto={portfolio?.crypto_value_eur}
@@ -436,8 +449,14 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Holdings Table */}
-            {portfolio && portfolio.holdings.length > 0 && (
+            {/* Performances par crypto (meilleures → pires) */}
+            <PerformanceTable rows={performance} totals={perfTotals} />
+
+            {/* Holdings Table — poussières (< 1€) masquées */}
+            {portfolio && portfolio.holdings.length > 0 && (() => {
+              const visibleHoldings = portfolio.holdings.filter(h => h.current_value_eur >= 1);
+              const dustCount = portfolio.holdings.length - visibleHoldings.length;
+              return (
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
                 <h3 className="text-white font-semibold mb-4">Positions ouvertes</h3>
                 <div className="overflow-x-auto">
@@ -453,7 +472,7 @@ export default function Dashboard() {
                       </tr>
                     </thead>
                     <tbody>
-                      {portfolio.holdings.map(h => (
+                      {visibleHoldings.map(h => (
                         <tr key={h.symbol} className="border-b border-gray-800/50">
                           <td className="py-2.5 px-3">
                             <div className="font-medium text-white">{h.symbol}</div>
@@ -493,11 +512,17 @@ export default function Dashboard() {
                       ))}
                     </tbody>
                   </table>
+                  {dustCount > 0 && (
+                    <p className="text-gray-600 text-xs px-1 pt-2">
+                      {dustCount} poussière{dustCount > 1 ? 's' : ''} (&lt; 1€) masquée{dustCount > 1 ? 's' : ''}
+                    </p>
+                  )}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
-            {/* Exchange balances — PROD only */}
+            {/* Actifs sur exchanges — PROD only */}
             {dbContext === 'prod' && <ExchangeBalances />}
 
             {/* Bot Controls + Cashout side by side */}
@@ -508,9 +533,9 @@ export default function Dashboard() {
                 dbContext={dbContext}
               />
               <CashoutPanel
-                portfolio={portfolio ?? (() => { const init = (parseFloat(config.initial_portfolio_eur ?? '5000') || 5000); return { total_value_eur: init, cash_eur: init, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }; })()}
+                portfolio={portfolio ?? (() => { const init = invested; return { total_value_eur: init, cash_eur: init, crypto_value_eur: 0, pnl_eur: 0, pnl_percent: 0, holdings: [] }; })()}
                 trades={trades}
-                initialInvestment={(parseFloat(config.initial_portfolio_eur ?? '5000') || 5000)}
+                initialInvestment={invested}
                 aiCosts={aiCosts as Parameters<typeof CashoutPanel>[0]['aiCosts']}
               />
             </div>

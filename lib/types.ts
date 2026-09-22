@@ -30,6 +30,13 @@ export interface TechnicalIndicators {
   bb_middle: number | null;
   bb_lower: number | null;
   trend: 'bullish' | 'bearish' | 'neutral';
+  // --- Signaux pré-boom / volatilité ---
+  volatility_pct: number | null;   // écart-type des rendements journaliers (%) — proxy ATR
+  volume_zscore: number | null;    // dernier volume vs moyenne 30j (> 2 = breakout)
+  bb_width_pct: number | null;     // largeur des bandes de Bollinger (%)
+  bb_squeeze: boolean;             // largeur au plus bas 20% (compression avant expansion)
+  roc_30d: number | null;          // momentum 30 jours (%)
+  macd_hist_slope: number | null;  // pente de l'histogramme MACD (signe = accélération)
 }
 
 export interface NewsItem {
@@ -52,6 +59,8 @@ export interface BotDecision {
   stop_loss_eur?: number;
   take_profit_eur?: number;
   timeframe: string;
+  // Vente partielle (take-profit 50%) : l'avg est conservée, le flag DB est levé
+  partial?: boolean;
 }
 
 export interface PortfolioHolding {
@@ -87,6 +96,9 @@ export interface RiskConfig {
   take_profit_pct: number;
   min_confidence: number;
   max_portfolio_crypto_pct: number;
+  // Budget risque par trade (% du total) : un stop-out ne coûte jamais plus.
+  // Taille = min(règles cash, max position, budget_risque / stop_dynamique)
+  risk_per_trade_pct: number;
 }
 
 export const RISK_CONFIGS: Record<RiskLevel, RiskConfig> = {
@@ -97,6 +109,7 @@ export const RISK_CONFIGS: Record<RiskLevel, RiskConfig> = {
     take_profit_pct: 10,
     min_confidence: 75,
     max_portfolio_crypto_pct: 50,
+    risk_per_trade_pct: 1,
   },
   moderate: {
     max_trades_per_day: 5,
@@ -105,6 +118,7 @@ export const RISK_CONFIGS: Record<RiskLevel, RiskConfig> = {
     take_profit_pct: 15,
     min_confidence: 65,
     max_portfolio_crypto_pct: 70,
+    risk_per_trade_pct: 1.5,
   },
   aggressive: {
     max_trades_per_day: 8,
@@ -113,8 +127,16 @@ export const RISK_CONFIGS: Record<RiskLevel, RiskConfig> = {
     take_profit_pct: 25,
     min_confidence: 55,
     max_portfolio_crypto_pct: 90,
+    risk_per_trade_pct: 2.5,
   },
 };
+
+// Stop dynamique partagé IA <-> exécution : 1.5× la volatilité journalière,
+// ancré à la config utilisateur (jamais < moitié ni > double du stop configuré).
+export function dynamicStopPct(dailyVolPct: number | null | undefined, cfgStopPct: number): number {
+  if (dailyVolPct === null || dailyVolPct === undefined || !(dailyVolPct > 0)) return cfgStopPct;
+  return Math.min(Math.max(1.5 * dailyVolPct, 0.5 * cfgStopPct), 2 * cfgStopPct);
+}
 
 export interface DailyReport {
   date: string;

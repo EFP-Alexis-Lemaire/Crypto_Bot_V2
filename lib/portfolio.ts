@@ -1,5 +1,5 @@
 import { sql, sqlForContext, DbContext } from './db';
-import { PortfolioSummary, PortfolioHolding, BotDecision, MarketData } from './types';
+import { PortfolioSummary, PortfolioHolding, BotDecision, MarketData, dynamicStopPct } from './types';
 import { getCurrentEnv, TradingEnv } from './env';
 
 type Row = Record<string, unknown>;
@@ -26,22 +26,33 @@ export async function getPortfolioSummary(
   // In live mode: sync from exchanges first to get real balances.
   // On garde le détail PAR exchange (pas seulement le total) pour que l'IA
   // et le routeur dimensionnent chaque ordre au cash de l'exchange qui paiera.
+  // IMPORTANT : on resync aussi les MONTANTS crypto (source de vérité = exchanges),
+  // sinon le dashboard affiche une DB périmée dès qu'un mouvement a lieu hors bot
+  // (trade manuel, staking...) — d'où des chutes fantômes qui font peur.
+  // Le sync préserve les avg_buy_price_eur (base des P&L et SL/TP).
   let cashKraken = 0;
   let cashCoinbase = 0;
   if (env === 'live') {
     try {
       const { getKrakenBalance } = await import('./exchanges/kraken');
       const { getCoinbaseBalance } = await import('./exchanges/coinbase');
+      const { syncPortfolioFromExchange } = await import('./exchanges/live-trader');
+
+      try {
+        await syncPortfolioFromExchange('both');
+      } catch { /* non-blocking : on continue avec la DB existante */ }
 
       let cashEur = 0;
       try {
         const kb = await getKrakenBalance();
-        cashKraken = (kb['EUR'] ?? 0) + (kb['USD'] ?? 0) * 0.92 + (kb['USDC'] ?? 0) * 0.92 + (kb['USDT'] ?? 0) * 0.92;
+        cashKraken = (kb['EUR'] ?? 0) + (kb['EURC'] ?? 0) + (kb['EURS'] ?? 0)
+          + (kb['USD'] ?? 0) * 0.92 + (kb['USDC'] ?? 0) * 0.92 + (kb['USDT'] ?? 0) * 0.92;
         cashEur += cashKraken;
       } catch {}
       try {
         const cb = await getCoinbaseBalance();
-        cashCoinbase = (cb['EUR'] ?? 0) + (cb['USD'] ?? 0) * 0.92 + (cb['USDC'] ?? 0) * 0.92 + (cb['USDT'] ?? 0) * 0.92;
+        cashCoinbase = (cb['EUR'] ?? 0) + (cb['EURC'] ?? 0) + (cb['EURS'] ?? 0)
+          + (cb['USD'] ?? 0) * 0.92 + (cb['USDC'] ?? 0) * 0.92 + (cb['USDT'] ?? 0) * 0.92;
         cashEur += cashCoinbase;
       } catch {}
 
@@ -65,15 +76,33 @@ export async function getPortfolioSummary(
   let crypto_value_eur = 0;
   const holdingDetails: PortfolioHolding[] = [];
 
+  // Stablecoins traités comme du cash (taux approx) : ils ne polluent plus
+  // les positions et ne valent plus 0€ dans le total
+  const STABLE_TO_EUR: Record<string, number> = {
+    USD: 0.92, USDC: 0.92, USDT: 0.92, USDG: 0.92, EURC: 1, EURS: 1,
+  };
+  let stableCash = 0;
+
   for (const holding of holdings) {
     if (holding.symbol === 'EUR') {
       cash_eur = parseFloat(str(holding, 'amount'));
       continue;
     }
     const symbol = String(holding.symbol ?? '');
-    const currentPrice = priceMap[symbol] ?? 0;
     const amount = parseFloat(str(holding, 'amount'));
+    if (STABLE_TO_EUR[symbol] !== undefined) {
+      stableCash += amount * STABLE_TO_EUR[symbol];
+      continue;
+    }
     const avgBuyPrice = parseFloat(str(holding, 'avg_buy_price_eur'));
+    // Si le prix marché est inconnu (symbole hors watchlist, CoinGecko en rate-limit...),
+    // on retombe sur le prix moyen d'achat plutôt que 0€ : ça évite de faire
+    // disparaître une position entière du total (fausse falaise sur le graphique).
+    let currentPrice = priceMap[symbol] ?? 0;
+    if (!(currentPrice > 0) && avgBuyPrice > 0 && amount * avgBuyPrice >= 5) {
+      console.warn(`[Portfolio] Prix inconnu pour ${symbol}, repli sur avg ${avgBuyPrice}`);
+      currentPrice = avgBuyPrice;
+    }
     const currentValue = amount * currentPrice;
     const costBasis = amount * avgBuyPrice;
     const pnl = currentValue - costBasis;
@@ -91,6 +120,7 @@ export async function getPortfolioSummary(
     });
   }
 
+  cash_eur += stableCash;
   const total_value_eur = cash_eur + crypto_value_eur;
 
   // Read initial capital from DB (context-aware), fallback to env var then 5000
@@ -175,10 +205,19 @@ export async function executePaperTrade(
         const existingAvg = parseFloat(str(existing[0], 'avg_buy_price_eur'));
         const newTotal = existingAmount + cryptoAmount;
         const newAvg = (existingAmount * existingAvg + cryptoAmount * currentPrice.price_eur) / newTotal;
-        await db`
-          UPDATE portfolio SET amount = ${newTotal}, avg_buy_price_eur = ${newAvg}, updated_at = NOW()
-          WHERE symbol = ${decision.symbol} AND env = ${env}
-        `;
+        // Renfort : l'échelle des TP repart de zéro (flag partiel reset).
+        // Fallback sans flag si la migration n'a pas été jouée (colonne absente).
+        try {
+          await db`
+            UPDATE portfolio SET amount = ${newTotal}, avg_buy_price_eur = ${newAvg}, partial_tp_taken = FALSE, updated_at = NOW()
+            WHERE symbol = ${decision.symbol} AND env = ${env}
+          `;
+        } catch {
+          await db`
+            UPDATE portfolio SET amount = ${newTotal}, avg_buy_price_eur = ${newAvg}, updated_at = NOW()
+            WHERE symbol = ${decision.symbol} AND env = ${env}
+          `;
+        }
       } else {
         await db`
           INSERT INTO portfolio (currency, symbol, amount, avg_buy_price_eur, env)
@@ -227,6 +266,12 @@ export async function executePaperTrade(
           UPDATE portfolio SET amount = ${newAmount}, updated_at = NOW()
           WHERE symbol = ${decision.symbol} AND env = ${env}
         `;
+        // Vente partielle (TP 50%) : le reliquat visera le palier 2
+        if (decision.partial === true) {
+          try {
+            await db`UPDATE portfolio SET partial_tp_taken = TRUE, updated_at = NOW() WHERE symbol = ${decision.symbol} AND env = ${env}`;
+          } catch { /* colonne absente pré-migration : non-bloquant */ }
+        }
       }
 
       await db`
@@ -272,11 +317,23 @@ export async function savePortfolioSnapshot(
   `;
 }
 
+export interface StopLossAction {
+  symbol: string;
+  action: 'SELL';
+  reason: string;
+  // Part de la position à vendre (1 = tout, 0.5 = take-profit partiel).
+  // Les routes dimensionnent amount_eur = valeur_position × ratio.
+  ratio: number;
+}
+
 export async function checkStopLossAndTakeProfit(
   marketData: MarketData[],
   envOverride?: TradingEnv,
-  ctx?: DbContext
-): Promise<{ symbol: string; action: 'SELL'; reason: string }[]> {
+  ctx?: DbContext,
+  // Volatilité journalière (%) par symbole (vient des indicateurs techniques).
+  // Sans vol : repli sur le stop configuré.
+  volBySymbol?: Record<string, number>
+): Promise<StopLossAction[]> {
   const db = dbFor(ctx);
   const env = envOverride ?? await getCurrentEnv();
   const holdings = (await db`
@@ -287,9 +344,24 @@ export async function checkStopLossAndTakeProfit(
   const configMap: Record<string, string> = {};
   configRows.forEach(c => { configMap[String(c.key ?? '')] = String(c.value ?? ''); });
 
-  const stopLossPct = parseFloat(configMap.stop_loss_pct ?? '8');
-  const takeProfitPct = parseFloat(configMap.take_profit_pct ?? '15');
-  const actions: { symbol: string; action: 'SELL'; reason: string }[] = [];
+  const stopLossCfg = parseFloat(configMap.stop_loss_pct ?? '8');
+  const takeProfitCfg = parseFloat(configMap.take_profit_pct ?? '15');
+  // Second palier : le reliquat sort à 2× le take-profit
+  const takeProfit2Cfg = takeProfitCfg * 2;
+
+  // Flag "TP partiel déjà pris" par position (colonne ajoutée par migration ;
+  // absente sur les vieilles DB -> on suppose false pour tout le monde)
+  const partialTaken: Record<string, boolean> = {};
+  try {
+    const flagRows = (await db`
+      SELECT symbol, partial_tp_taken FROM portfolio WHERE symbol != 'EUR' AND env = ${env}
+    `) as Row[];
+    for (const r of flagRows) {
+      partialTaken[String(r.symbol)] = String(r.partial_tp_taken).toLowerCase() === 'true';
+    }
+  } catch { /* colonne absente : aucun TP partiel pris */ }
+
+  const actions: StopLossAction[] = [];
 
   for (const holding of holdings) {
     const symbol = String(holding.symbol ?? '');
@@ -299,7 +371,8 @@ export async function checkStopLossAndTakeProfit(
     // Filtre dust : une poussière (< 5€) ne doit jamais déclencher un SELL
     // (Kraken rejette avec "volume minimum not met")
     const amount = parseFloat(str(holding, 'amount'));
-    if (amount * market.price_eur < 5) continue;
+    const positionValue = amount * market.price_eur;
+    if (positionValue < 5) continue;
 
     const avgBuyPrice = parseFloat(str(holding, 'avg_buy_price_eur'));
     // avg_buy_price = 0 (positions sync depuis l'exchange) : pas de base de calcul -> skip
@@ -307,10 +380,26 @@ export async function checkStopLossAndTakeProfit(
     if (!(avgBuyPrice > 0)) continue;
     const change = ((market.price_eur - avgBuyPrice) / avgBuyPrice) * 100;
 
-    if (change <= -stopLossPct) {
-      actions.push({ symbol, action: 'SELL', reason: `Stop-loss: ${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€` });
-    } else if (change >= takeProfitPct) {
-      actions.push({ symbol, action: 'SELL', reason: `Take-profit: +${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€` });
+    // Stop-loss DYNAMIQUE : 1.5× la volatilité, ancré à la config utilisateur
+    const dynStop = dynamicStopPct(volBySymbol?.[symbol] ?? null, stopLossCfg);
+
+    if (change <= -dynStop) {
+      actions.push({ symbol, action: 'SELL', ratio: 1, reason: `Stop-loss: ${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€ (stop dyn ${dynStop.toFixed(1)}%)` });
+    } else if (change >= takeProfit2Cfg && partialTaken[symbol]) {
+      // Second palier : le reliquat sort, la tendance a doublé l'objectif
+      actions.push({ symbol, action: 'SELL', ratio: 1, reason: `Take-profit palier 2: +${change.toFixed(2)}% (objectif initial +${takeProfitCfg}%), sortie du reliquat` });
+    } else if (change >= takeProfitCfg && !partialTaken[symbol]) {
+      // Premier palier : on sécurise 50%, le reste continue de courir.
+      // Si la position est trop petite pour splitter (< 10€), sortie totale.
+      const ratio = positionValue >= 10 ? 0.5 : 1;
+      actions.push({
+        symbol,
+        action: 'SELL',
+        ratio,
+        reason: ratio < 1
+          ? `Take-profit partiel (50%): +${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€ — le reliquat continue de courir`
+          : `Take-profit: +${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€ (position < 10€ : sortie totale)`,
+      });
     }
   }
   return actions;

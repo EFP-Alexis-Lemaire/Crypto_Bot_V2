@@ -6,10 +6,12 @@ import {
   BotDecision,
   RiskLevel,
   RISK_CONFIGS,
+  dynamicStopPct,
 } from './types';
 import { logAICost } from './ai-costs';
 import { getDefiTVL } from './market-data';
 import { getBotMemory, formatMemoryForPrompt } from './memory';
+import { DbContext } from './db';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -39,6 +41,13 @@ interface AnalysisContext {
   riskLevel: RiskLevel;
   tradesExecutedToday: number;
   eurUsdRate: number;
+  // Contexte DB (UAT/PROD) pour la mémoire du bot. Défaut UAT.
+  dbContext?: DbContext;
+  // Régime de marché (breadth + dominance BTC) pour calibrer l'agressivité
+  marketRegime?: {
+    breadth_pct: number | null;   // % des actifs suivis au-dessus de leur SMA50
+    btc_dominance: number | null; // dominance BTC (% market cap)
+  };
 }
 
 export async function analyzeMarketWithAI(
@@ -46,8 +55,9 @@ export async function analyzeMarketWithAI(
 ): Promise<BotDecision[]> {
   const riskConfig = RISK_CONFIGS[context.riskLevel];
 
-  // Load bot memory in parallel with screening
-  const memory = await getBotMemory();
+  // Load bot memory in parallel with screening — mémoire du CONTEXTE
+  // (UAT et PROD apprennent séparément, sans mélange)
+  const memory = await getBotMemory(context.dbContext ?? 'uat');
   const memoryText = formatMemoryForPrompt(memory);
 
   // Step 1: Fast pre-screening with GPT-4o-mini
@@ -125,6 +135,7 @@ export async function analyzeMarketWithAI(
 
   try {
     const parsed = JSON.parse(decisionJson);
+    const totalValue = context.currentPortfolio.total_value_eur;
     const cashAvailable = context.currentPortfolio.cash_eur;
     // En mode live multi-exchange, un ordre est payé par UN SEUL exchange :
     // le cap se fait sur le max des deux soldes, jamais sur le total consolidé.
@@ -140,6 +151,15 @@ export async function analyzeMarketWithAI(
 
     const krakenOnly = new Set(context.currentPortfolio.unavailable_on_coinbase ?? []);
     const krakenCash = context.currentPortfolio.cash_kraken_eur;
+    const volBySymbol: Record<string, number> = {};
+    for (const t of context.technicalIndicators) {
+      if (t.volatility_pct !== null && t.volatility_pct !== undefined && t.volatility_pct > 0) {
+        volBySymbol[t.symbol] = t.volatility_pct;
+      }
+    }
+    // Budget risque : un stop-out ne coûte jamais plus de X% du portefeuille
+    const riskBudgetEur = totalValue * riskConfig.risk_per_trade_pct / 100;
+    const maxPosEur = totalValue * riskConfig.max_position_size_pct / 100;
 
     const decisions: BotDecision[] = (parsed.decisions ?? [])
       .map((d: BotDecision) => {
@@ -150,6 +170,22 @@ export async function analyzeMarketWithAI(
           : capBase;
         if (d.action === 'BUY' && d.amount_eur > symbolCap) {
           d.amount_eur = parseFloat((symbolCap * 0.80).toFixed(2));
+        }
+        // Hard cap risque : taille calibrée sur le stop dynamique (1.5× vol).
+        // Ex: budget 15€, stop 6% → 250€ max, même si le cash permet plus.
+        if (d.action === 'BUY') {
+          const vol = volBySymbol[d.symbol];
+          const stopPct = dynamicStopPct(vol ?? null, riskConfig.stop_loss_pct);
+          const riskCap = stopPct > 0 ? riskBudgetEur / (stopPct / 100) : symbolCap;
+          const finalCap = Math.min(symbolCap * 0.80, maxPosEur, riskCap);
+          if (d.amount_eur > finalCap) {
+            d.amount_eur = parseFloat(Math.max(finalCap, 0).toFixed(2));
+          }
+          // Cohérence : le stop_loss annoncé suit le stop dynamique
+          const marketPrice = context.marketData.find(m => m.symbol === d.symbol)?.price_eur;
+          if (marketPrice && marketPrice > 0) {
+            d.stop_loss_eur = parseFloat((marketPrice * (1 - stopPct / 100)).toFixed(6));
+          }
         }
         // If after capping the amount is below minimum, convert to SKIP
         if (d.action === 'BUY' && d.amount_eur < 5) {
@@ -229,6 +265,10 @@ function buildDecisionPrompt(
   );
 
   const portfolioDetail = JSON.stringify(context.currentPortfolio, null, 2);
+  const breadth = context.marketRegime?.breadth_pct;
+  const btcDom = context.marketRegime?.btc_dominance;
+  const riskBudgetEur = (context.currentPortfolio.total_value_eur * riskConfig.risk_per_trade_pct / 100);
+  const maxPosEur = (context.currentPortfolio.total_value_eur * riskConfig.max_position_size_pct / 100);
 
   return `
 Prends des décisions de trading RÉFLÉCHIES pour le portefeuille suivant.
@@ -238,6 +278,21 @@ ${memoryText}
 === CONTEXTE MARCHÉ ===
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
 Taux EUR/USD: ${context.eurUsdRate} (FAVORISE les paires EUR quand disponibles)
+
+=== RÉGIME DE MARCHÉ (CALIBRE TON AGRESSIVITÉ) ===
+Breadth (% actifs suivis > SMA50): ${breadth !== null && breadth !== undefined ? `${breadth.toFixed(0)}%` : 'N/A'}
+Dominance BTC: ${btcDom !== null && btcDom !== undefined ? `${btcDom.toFixed(1)}%` : 'N/A'}
+${breadth !== null && breadth !== undefined && breadth < 30 ? `→ Marché FRAGILE : ultra-sélectif (confiance ≥ 75% exigée), montants réduits de moitié, aucun achat de small-cap.` : ''}
+${breadth !== null && breadth !== undefined && breadth >= 30 && breadth < 55 ? `→ Marché NEUTRE : tailles normales, setups avec confirmation volume uniquement.` : ''}
+${breadth !== null && breadth !== undefined && breadth >= 55 ? `→ Marché PORTEUR : tu peux dimensionner plein budget, les breakouts ont le vent dans le dos.` : ''}
+
+=== DIMENSIONNEMENT AU RISQUE RÉEL (OBLIGATOIRE) ===
+Budget risque par trade: ${riskConfig.risk_per_trade_pct}% du total (≈ ${riskBudgetEur.toFixed(2)}€) — un stop-out ne coûte jamais plus.
+Stop dynamique par actif: stop% = 1.5 × vol journalière, borné [${(0.5 * riskConfig.stop_loss_pct).toFixed(1)}%, ${(2 * riskConfig.stop_loss_pct).toFixed(1)}%].
+- amount max "risque" = budget / stop% (ex: budget ${riskBudgetEur.toFixed(2)}€, stop 6% → ${(riskBudgetEur / 0.06).toFixed(0)}€ max)
+- amount final = min(règles cash ci-dessous, max position ${maxPosEur.toFixed(0)}€, montant risque)
+- stop_loss_eur = prix × (1 − stop%) — PAS un % fixe au hasard
+- Le bot vend 50% au take-profit puis laisse courir le reste : dimensionne pour que le reliquat compte encore.
 
 === GESTION DU CASH (RÈGLE ABSOLUE) ===
 Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€${context.currentPortfolio.cash_kraken_eur !== undefined ? `
@@ -281,9 +336,13 @@ Coût aller-retour complet (achat + vente future): ~0.52%
 → NE JAMAIS prendre un trade si le potentiel de gain est < 1.5% (en dessous du seuil de rentabilité avec frais)
 → Objectif minimum de gain NET après frais: au moins 2% pour que le trade ait du sens
 
-=== CANDIDATS ANALYSÉS ===
+=== CANDIDATS ANALYSÉS (SIGNAUX PRÉ-BOOM) ===
+Lecture : VolZ = z-score du volume vs 30j (> 2 = afflux inhabituel = smart money possible).
+Squeeze BB = volatilité comprimée au plus bas (l'énergie avant l'expansion).
+ROC30 = momentum 30j. Pente MACD > 0 = momentum qui accélère.
 ${candidateData.map(m => {
   const tech = technicals.find(t => t.symbol === m.symbol);
+  const stopPct = dynamicStopPct(tech?.volatility_pct ?? null, riskConfig.stop_loss_pct);
   return `
 ${m.symbol} (${m.name}):
   Prix: ${m.price_eur.toFixed(6)}€ / ${m.price_usd.toFixed(6)}$
@@ -293,9 +352,13 @@ ${m.symbol} (${m.name}):
   Market Cap Rank: #${m.market_cap_rank}
   Distance ATH: ${m.ath_change_percentage.toFixed(1)}%
   ${tech ? `RSI(14): ${tech.rsi_14?.toFixed(1) ?? 'N/A'}
-  MACD: ${tech.macd?.toFixed(6) ?? 'N/A'} | Signal: ${tech.macd_signal?.toFixed(6) ?? 'N/A'}
+  MACD: ${tech.macd?.toFixed(6) ?? 'N/A'} | Signal: ${tech.macd_signal?.toFixed(6) ?? 'N/A'} | Pente histo: ${tech.macd_hist_slope !== null && tech.macd_hist_slope !== undefined ? (tech.macd_hist_slope >= 0 ? '+' : '') + tech.macd_hist_slope.toFixed(6) : 'N/A'}
   Tendance: ${tech.trend}
-  SMA20: ${tech.sma_20?.toFixed(6) ?? 'N/A'} | SMA50: ${tech.sma_50?.toFixed(6) ?? 'N/A'}` : ''}
+  SMA20: ${tech.sma_20?.toFixed(6) ?? 'N/A'} | SMA50: ${tech.sma_50?.toFixed(6) ?? 'N/A'}
+  Volatilité j: ${tech.volatility_pct !== null && tech.volatility_pct !== undefined ? tech.volatility_pct.toFixed(2) + '%' : 'N/A'} → stop dynamique suggéré: ${stopPct.toFixed(1)}%
+  Volume z-score: ${tech.volume_zscore !== null && tech.volume_zscore !== undefined ? tech.volume_zscore.toFixed(2) + (tech.volume_zscore >= 2 ? ' 🔥 BREAKOUT' : '') : 'N/A'}
+  Squeeze Bollinger: ${tech.bb_squeeze ? 'OUI ⚡ (compression)' : 'non'} (largeur: ${tech.bb_width_pct !== null && tech.bb_width_pct !== undefined ? tech.bb_width_pct.toFixed(2) + '%' : 'N/A'})
+  ROC 30j: ${tech.roc_30d !== null && tech.roc_30d !== undefined ? (tech.roc_30d >= 0 ? '+' : '') + tech.roc_30d.toFixed(1) + '%' : 'N/A'}` : ''}
 `;
 }).join('')}
 

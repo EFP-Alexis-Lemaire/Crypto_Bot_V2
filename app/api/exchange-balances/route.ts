@@ -96,7 +96,7 @@ export async function GET() {
   }
 
   // Fetch prices — known symbols via getMarketData, unknowns via CoinGecko simple/price
-  const cryptoSymbols = Object.keys(merged).filter(s => !['EUR','USD','USDC','USDT'].includes(s));
+  const cryptoSymbols = Object.keys(merged).filter(s => !['EUR','USD','USDC','USDT','EURC','EURS'].includes(s));
   const knownIds = cryptoSymbols.filter(s => COINGECKO_IDS[s]).map(s => COINGECKO_IDS[s]);
   const unknownSymbols = cryptoSymbols.filter(s => !COINGECKO_IDS[s]);
 
@@ -153,7 +153,7 @@ export async function GET() {
       continue;
     }
 
-    // Stablecoins — treat as ~1 EUR (approximation)
+    // Stablecoins USD — treat as ~1 EUR (approximation)
     if (sym === 'USD' || sym === 'USDC' || sym === 'USDT') {
       const valueEur = amount * 0.92; // rough EUR/USD
       cashEur += valueEur;
@@ -161,6 +161,16 @@ export async function GET() {
       if (isKrakenOnly) result.cash_kraken_eur += valueEur;
       else if (isCoinbaseOnly) result.cash_coinbase_eur += valueEur;
       result.balances.push({ symbol: sym, amount, price_eur: 0.92, value_eur: valueEur, source });
+      continue;
+    }
+
+    // Stablecoins EUR (ex: EURC sur Coinbase) : 1 unité ≈ 1€, comptés en cash
+    if (sym === 'EURC' || sym === 'EURS') {
+      cashEur += amount;
+      totalEur += amount;
+      if (isKrakenOnly) result.cash_kraken_eur += amount;
+      else if (isCoinbaseOnly) result.cash_coinbase_eur += amount;
+      result.balances.push({ symbol: sym, amount, price_eur: 1, value_eur: amount, source });
       continue;
     }
 
@@ -188,7 +198,8 @@ export async function GET() {
   // Répartition exacte du cash par exchange depuis les soldes bruts
   // (le merge ci-dessus perd l'attribution quand EUR est des deux côtés)
   const cashOf = (bal: Record<string, number>) =>
-    (bal['EUR'] ?? 0) + (bal['USD'] ?? 0) * 0.92 + (bal['USDC'] ?? 0) * 0.92 + (bal['USDT'] ?? 0) * 0.92;
+    (bal['EUR'] ?? 0) + (bal['EURC'] ?? 0) + (bal['EURS'] ?? 0)
+    + (bal['USD'] ?? 0) * 0.92 + (bal['USDC'] ?? 0) * 0.92 + (bal['USDT'] ?? 0) * 0.92;
   result.cash_kraken_eur = cashOf(krakenBal);
   result.cash_coinbase_eur = cashOf(coinbaseBal);
 

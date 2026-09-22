@@ -9,6 +9,7 @@ import {
   getCoinHistory,
   calculateTechnicalIndicators,
   getDefiTVL,
+  getBtcDominance,
   WATCHLIST_COINS,
   SYMBOL_TO_COINGECKO_ID,
 } from '@/lib/market-data';
@@ -110,6 +111,7 @@ export async function GET(request: Request) {
       eurUsdRate,
       trendingCoins,
       defiTVL,
+      btcDominance,
     ] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getCryptoNews(),
@@ -117,6 +119,7 @@ export async function GET(request: Request) {
       getEurUsdRate(),
       getTrendingCoins(),
       getDefiTVL(),
+      getBtcDominance(),
     ]);
 
     // Add trending coins to market data if not already there
@@ -142,9 +145,13 @@ export async function GET(request: Request) {
             coin.symbol.toLowerCase();
           const history = await getCoinHistory(coinId, 60);
           const prices = history.map(h => h.price);
+          const volumes = history.map(h => h.volume ?? 0);
 
           if (prices.length >= 26) {
-            const indicators = calculateTechnicalIndicators(prices);
+            const indicators = calculateTechnicalIndicators(
+              prices,
+              volumes.some(v => v > 0) ? volumes : undefined
+            );
             technicalIndicators.push({ symbol: coin.symbol, ...indicators });
           }
         } catch (e) {
@@ -152,6 +159,25 @@ export async function GET(request: Request) {
         }
       })
     );
+
+    // Régime de marché : breadth (% > SMA50) + dominance BTC (cache 10 min)
+    let breadth: number | null = null;
+    {
+      const withSma = technicalIndicators.filter(t => t.sma_50 !== null && t.sma_50 !== undefined);
+      if (withSma.length >= 5) {
+        const above = withSma.filter(t => {
+          const px = allMarketData.find(m => m.symbol === t.symbol)?.price_eur;
+          return px !== undefined && t.sma_50 !== null && t.sma_50 !== undefined && px > (t.sma_50 as number);
+        }).length;
+        breadth = (above / withSma.length) * 100;
+      }
+    }
+    const volMap: Record<string, number> = {};
+    for (const t of technicalIndicators) {
+      if (t.volatility_pct !== null && t.volatility_pct !== undefined && t.volatility_pct > 0) {
+        volMap[t.symbol] = t.volatility_pct;
+      }
+    }
 
     // Sync from exchange if live mode (live trader écrit en PROD : ne sync que si on est sur la DB prod)
     if (isLive && dbContext === 'prod') {
@@ -162,9 +188,9 @@ export async function GET(request: Request) {
     // relire trading_mode sur la mauvaise DB
     const portfolio = await getPortfolioSummary(allMarketData, currentEnv, dbContext);
 
-    // Check stop-loss / take-profit first (le filtre dust < 5€ est dans checkStopLossAndTakeProfit)
+    // Check stop-loss (dynamique : 1.5× vol) / take-profit par paliers (50% puis solde)
     console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
-    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, currentEnv, dbContext);
+    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, currentEnv, dbContext, volMap);
 
     // Track recently sold symbols to prevent immediate rebuy
     const recentlySoldResult = (await db`
@@ -181,15 +207,17 @@ export async function GET(request: Request) {
 
       const positionValue = portfolio.holdings.find(h => h.symbol === slAction.symbol)
         ?.current_value_eur ?? 0;
+      // Palier : 1 = sortie totale (SL / palier 2), 0.5 = TP partiel
+      const sellAmount = positionValue * (slAction.ratio ?? 1);
       // Filtre dust : ne jamais appeler l'exchange sous le minimum Kraken (~5€)
-      if (positionValue < 5) {
-        console.log(`[Bot Cycle ${cycleId}] Skipping SELL ${slAction.symbol} — dust ${positionValue.toFixed(2)}€ < 5€`);
+      if (sellAmount < 5) {
+        console.log(`[Bot Cycle ${cycleId}] Skipping SELL ${slAction.symbol} — dust ${sellAmount.toFixed(2)}€ < 5€`);
         await db`
           INSERT INTO bot_decisions
             (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, env)
           VALUES (
             ${cycleId}, ${slAction.symbol}, 'SKIP',
-            ${`Poussière ignorée: position ${positionValue.toFixed(2)}€ < 5€ minimum exchange. ${slAction.reason}`},
+            ${`Poussière ignorée: vente ${sellAmount.toFixed(2)}€ < 5€ minimum exchange. ${slAction.reason}`},
             0, 0, 'dust-filter',
             ${JSON.stringify({ price: marketCoin.price_eur })},
             ${JSON.stringify({})}, ${currentEnv}
@@ -201,11 +229,12 @@ export async function GET(request: Request) {
       const slDecision: BotDecision = {
         symbol: slAction.symbol,
         action: 'SELL',
-        amount_eur: positionValue,
+        amount_eur: sellAmount,
         reasoning: slAction.reason,
         confidence: 95,
         risk_score: 10,
         timeframe: 'Immédiat',
+        partial: (slAction.ratio ?? 1) < 1,
       };
 
       const result = isLive
@@ -262,6 +291,8 @@ export async function GET(request: Request) {
       riskLevel,
       tradesExecutedToday: tradesExecutedToday + stopLossActions.length,
       eurUsdRate,
+      dbContext,
+      marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance },
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
@@ -377,11 +408,19 @@ export async function GET(request: Request) {
           else coinbaseCashMem = Math.max(0, coinbaseCashMem - decision.amount_eur);
           portfolio.cash_eur = Math.max(0, portfolio.cash_eur - decision.amount_eur);
         } else if (decision.action === 'SELL') {
-          // La vente crédite l'exchange vendeur (montant net approximatif)
-          const credited = decision.amount_eur * 0.9974;
-          if (usedExchange === 'kraken') krakenCashMem += credited;
-          else coinbaseCashMem += credited;
-          portfolio.cash_eur += credited;
+          // Vente splittée : on crédite chaque exchange au net réellement reçu
+          const split = (result as { split?: { kraken: number; coinbase: number } }).split;
+          if (split) {
+            krakenCashMem += split.kraken;
+            coinbaseCashMem += split.coinbase;
+            portfolio.cash_eur += split.kraken + split.coinbase;
+          } else {
+            // La vente crédite l'exchange vendeur (montant net approximatif)
+            const credited = decision.amount_eur * 0.9974;
+            if (usedExchange === 'kraken') krakenCashMem += credited;
+            else coinbaseCashMem += credited;
+            portfolio.cash_eur += credited;
+          }
         }
       }
 

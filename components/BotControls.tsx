@@ -200,6 +200,16 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     setTimeout(() => setMessage(''), 4000);
   };
 
+  // Ajustement rapide du capital investi (ex: +20€ après un virement, −20€ après un retrait)
+  const adjustCapital = async (delta: number) => {
+    const current = parseFloat(localConfig.initial_portfolio_eur) || 0;
+    const strVal = Math.max(0, current + delta).toFixed(2);
+    setLocalConfig(prev => ({ ...prev, initial_portfolio_eur: strVal }));
+    await updateConfig('initial_portfolio_eur', strVal);
+    setMessage(`Capital investi: ${strVal}€ (${delta >= 0 ? '+' : ''}${delta}€)`);
+    setTimeout(() => setMessage(''), 4000);
+  };
+
   const riskLevels = [
     { key: 'conservative', label: 'Conservateur', icon: Shield, activeClass: 'bg-green-500/15 text-green-400 border-green-500/40' },
     { key: 'moderate',     label: 'Modere',        icon: TrendingUp, activeClass: 'bg-blue-500/15 text-blue-400 border-blue-500/40' },
@@ -274,44 +284,58 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
           </div>
         )}
 
-        {/* Capital de référence */}
-        <div className="flex items-center justify-between p-3 rounded-xl border bg-gray-800/50 border-gray-700/50">
-          <div className="flex items-center gap-2">
-            <Euro className="w-4 h-4 text-yellow-400 flex-shrink-0" />
-            <div>
-              <div className="text-gray-300 text-sm font-semibold">Capital investi</div>
-              <div className="text-gray-500 text-xs mt-0.5">Référence pour le calcul du P&L</div>
-            </div>
-          </div>
-          {editingCapital ? (
+        {/* Capital investi */}
+        <div className="p-3 rounded-xl border bg-gray-800/50 border-gray-700/50 space-y-2.5">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min="1"
-                step="any"
-                value={capitalInput}
-                onChange={e => setCapitalInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') saveCapital(); if (e.key === 'Escape') setEditingCapital(false); }}
-                placeholder={localConfig.initial_portfolio_eur}
-                className="w-24 bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-yellow-500"
-                autoFocus
-              />
-              <button onClick={saveCapital} className="px-2.5 py-1.5 bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 rounded-lg text-xs font-semibold hover:bg-yellow-500/30 transition-all">
-                OK
-              </button>
-              <button onClick={() => setEditingCapital(false)} className="px-2 py-1.5 text-gray-500 hover:text-gray-300 text-xs transition-all">
-                ✕
-              </button>
+              <Euro className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+              <div>
+                <div className="text-gray-300 text-sm font-semibold">Capital investi</div>
+                <div className="text-gray-500 text-xs mt-0.5">Référence pour le calcul du P&L</div>
+              </div>
             </div>
-          ) : (
-            <button
-              onClick={() => { setEditingCapital(true); setCapitalInput(localConfig.initial_portfolio_eur); }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs font-bold transition-all"
-            >
-              {parseFloat(localConfig.initial_portfolio_eur).toFixed(2)}€
-              <span className="text-gray-400 font-normal">Modifier</span>
-            </button>
-          )}
+            {editingCapital ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  value={capitalInput}
+                  onChange={e => setCapitalInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') saveCapital(); if (e.key === 'Escape') setEditingCapital(false); }}
+                  placeholder={localConfig.initial_portfolio_eur}
+                  className="w-24 bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-yellow-500"
+                  autoFocus
+                />
+                <button onClick={saveCapital} className="px-2.5 py-1.5 bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 rounded-lg text-xs font-semibold hover:bg-yellow-500/30 transition-all">
+                  OK
+                </button>
+                <button onClick={() => setEditingCapital(false)} className="px-2 py-1.5 text-gray-500 hover:text-gray-300 text-xs transition-all">
+                  ✕
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setEditingCapital(true); setCapitalInput(localConfig.initial_portfolio_eur); }}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs font-bold transition-all"
+              >
+                {parseFloat(localConfig.initial_portfolio_eur).toFixed(2)}€
+                <span className="text-gray-400 font-normal">Modifier</span>
+              </button>
+            )}
+          </div>
+          {/* Ajustement rapide : virement reçu (+) ou retrait (−) */}
+          <div className="grid grid-cols-4 gap-2">
+            {[-100, -20, 20, 100].map(delta => (
+              <button
+                key={delta}
+                onClick={() => adjustCapital(delta)}
+                className={`py-1.5 rounded-lg text-xs font-bold border transition-all ${delta < 0 ? 'bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/20' : 'bg-green-500/10 text-green-400 border-green-500/20 hover:bg-green-500/20'}`}
+              >
+                {delta >= 0 ? `+${delta}€` : `${delta}€`}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Risk level */}

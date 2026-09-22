@@ -117,7 +117,7 @@ export async function getMarketData(coinIds?: string[]): Promise<MarketData[]> {
 export async function getCoinHistory(
   coinId: string,
   days: number = 30
-): Promise<{ timestamp: number; price: number }[]> {
+): Promise<{ timestamp: number; price: number; volume: number }[]> {
   try {
     const params: Record<string, string> = {
       vs_currency: 'eur',
@@ -134,9 +134,11 @@ export async function getCoinHistory(
       { params, timeout: 15000 }
     );
 
-    return res.data.prices.map(([timestamp, price]: [number, number]) => ({
+    const volumes: Array<[number, number]> = res.data.total_volumes ?? [];
+    return res.data.prices.map(([timestamp, price]: [number, number], i: number) => ({
       timestamp,
       price,
+      volume: volumes[i]?.[1] ?? 0,
     }));
   } catch (error) {
     // 404 = coin inconnu/délisté (ex: trending "gram") : normal, on skip sans spammer les logs.
@@ -383,24 +385,49 @@ export async function getCryptoNews(): Promise<NewsItem[]> {
     .slice(0, 25);
 }
 
+function emptyIndicators(): Omit<TechnicalIndicators, 'symbol'> {
+  return {
+    rsi_14: null,
+    macd: null,
+    macd_signal: null,
+    macd_histogram: null,
+    sma_20: null,
+    sma_50: null,
+    ema_12: null,
+    ema_26: null,
+    bb_upper: null,
+    bb_middle: null,
+    bb_lower: null,
+    trend: 'neutral',
+    volatility_pct: null,
+    volume_zscore: null,
+    bb_width_pct: null,
+    bb_squeeze: false,
+    roc_30d: null,
+    macd_hist_slope: null,
+  };
+}
+
+// Volatilité journalière (%) : écart-type des rendements log (proxy ATR pour le sizing)
+export function calculateVolatilityPct(prices: number[], lookback = 30): number | null {
+  if (prices.length < 5) return null;
+  const slice = prices.slice(-(lookback + 1));
+  const rets: number[] = [];
+  for (let i = 1; i < slice.length; i++) {
+    if (slice[i - 1] > 0 && slice[i] > 0) rets.push(Math.log(slice[i] / slice[i - 1]));
+  }
+  if (rets.length < 4) return null;
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, r) => a + Math.pow(r - mean, 2), 0) / rets.length;
+  return Math.sqrt(variance) * 100;
+}
+
 export function calculateTechnicalIndicators(
-  prices: number[]
+  prices: number[],
+  volumes?: number[]
 ): Omit<TechnicalIndicators, 'symbol'> {
   if (prices.length < 26) {
-    return {
-      rsi_14: null,
-      macd: null,
-      macd_signal: null,
-      macd_histogram: null,
-      sma_20: null,
-      sma_50: null,
-      ema_12: null,
-      ema_26: null,
-      bb_upper: null,
-      bb_middle: null,
-      bb_lower: null,
-      trend: 'neutral',
-    };
+    return emptyIndicators();
   }
 
   const rsi_14 = calculateRSI(prices, 14);
@@ -447,6 +474,57 @@ export function calculateTechnicalIndicators(
     trend = 'bearish';
   }
 
+  // --- Signaux pré-boom / volatilité ---
+  const volatility_pct = calculateVolatilityPct(prices);
+
+  // Z-score du dernier volume vs 30 précédents (> 2 = breakout d'intérêt)
+  let volume_zscore: number | null = null;
+  if (volumes && volumes.length >= 10) {
+    const prev = volumes.slice(-31, -1);
+    const last = volumes[volumes.length - 1];
+    if (prev.length >= 5 && last > 0) {
+      const mean = prev.reduce((a, b) => a + b, 0) / prev.length;
+      const variance = prev.reduce((a, v) => a + Math.pow(v - mean, 2), 0) / prev.length;
+      const std = Math.sqrt(variance);
+      volume_zscore = std > 0 ? (last - mean) / std : 0;
+    }
+  }
+
+  // Largeur des bandes + squeeze (compression = énergie avant expansion)
+  let bb_width_pct: number | null = null;
+  let bb_squeeze = false;
+  if (bb_upper !== null && bb_lower !== null && bb_middle) {
+    bb_width_pct = ((bb_upper - bb_lower) / bb_middle) * 100;
+    // Percentile de la largeur actuelle vs fenêtres 20j glissantes sur 60 points
+    const widths: number[] = [];
+    for (let start = Math.max(0, prices.length - 60); start + 20 <= prices.length; start++) {
+      const w = prices.slice(start, start + 20);
+      const m = w.reduce((a, b) => a + b, 0) / 20;
+      if (!(m > 0)) continue;
+      const v = w.reduce((acc, p) => acc + Math.pow(p - m, 2), 0) / 20;
+      widths.push((2 * Math.sqrt(v) * 2 / m) * 100); // (upper-lower)/middle en %
+    }
+    if (widths.length >= 5 && bb_width_pct !== null) {
+      const below = widths.filter(w => w < (bb_width_pct as number)).length;
+      bb_squeeze = below / widths.length <= 0.2;
+    }
+  }
+
+  // Momentum 30 jours
+  let roc_30d: number | null = null;
+  if (prices.length >= 31) {
+    const ref = prices[prices.length - 31];
+    if (ref > 0) roc_30d = ((currentPrice - ref) / ref) * 100;
+  }
+
+  // Pente de l'histogramme MACD (accélération du momentum)
+  let macd_hist_slope: number | null = null;
+  if (macdPrices.length >= 2) {
+    const prevMacd = macdPrices[macdPrices.length - 2];
+    const prevHist = prevMacd - macd_signal;
+    macd_hist_slope = macd_histogram - prevHist;
+  }
+
   return {
     rsi_14,
     macd: macdLine,
@@ -460,7 +538,35 @@ export function calculateTechnicalIndicators(
     bb_middle,
     bb_lower,
     trend,
+    volatility_pct,
+    volume_zscore,
+    bb_width_pct,
+    bb_squeeze,
+    roc_30d,
+    macd_hist_slope,
   };
+}
+
+// Dominance BTC (%) — régime de marché (altseason vs fuite vers BTC).
+// CoinGecko /global, cache 10 min, null si inaccessible (non-bloquant).
+let _globalCache: { btc: number; at: number } | null = null;
+export async function getBtcDominance(): Promise<number | null> {
+  if (_globalCache && Date.now() - _globalCache.at < 10 * 60 * 1000) return _globalCache.btc;
+  try {
+    const params: Record<string, string> = {};
+    if (process.env.COINGECKO_API_KEY) {
+      params['x_cg_demo_api_key'] = process.env.COINGECKO_API_KEY;
+    }
+    const res = await axios.get(`${COINGECKO_BASE}/global`, { params, timeout: 10000 });
+    const btc = Number(res.data?.data?.market_cap_percentage?.btc);
+    if (Number.isFinite(btc) && btc > 0) {
+      _globalCache = { btc, at: Date.now() };
+      return btc;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function calculateRSI(prices: number[], period: number): number {

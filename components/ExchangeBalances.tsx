@@ -145,16 +145,22 @@ export default function ExchangeBalances() {
           </div>
         </div>
 
-        {/* Balances list */}
-        {data.balances.length === 0 ? (
-          <div className="text-center py-6 text-gray-500 text-sm">
-            Aucun actif trouvé sur les exchanges
-          </div>
-        ) : (
+        {/* Balances list — poussières (< 1€ valorisé) masquées, totaux inchangés */}
+        {(() => {
+          const visible = data.balances.filter(b => b.value_eur === null || b.value_eur >= 1);
+          const dustCount = data.balances.length - visible.length;
+          if (visible.length === 0) {
+            return (
+              <div className="text-center py-6 text-gray-500 text-sm">
+                Aucun actif trouvé sur les exchanges
+              </div>
+            );
+          }
+          return (
           <div className="space-y-2">
-            {data.balances.map(b => {
+            {visible.map(b => {
               const badge = SOURCE_BADGE[b.source];
-              const isEur = b.symbol === 'EUR' || b.symbol === 'USDC' || b.symbol === 'USDT' || b.symbol === 'USD';
+              const isEur = b.symbol === 'EUR' || b.symbol === 'USDC' || b.symbol === 'USDT' || b.symbol === 'USD' || b.symbol === 'EURC' || b.symbol === 'EURS';
               return (
                 <div
                   key={b.symbol}
@@ -198,8 +204,14 @@ export default function ExchangeBalances() {
                 </div>
               );
             })}
+            {dustCount > 0 && (
+              <p className="text-gray-600 text-xs px-1 pt-1">
+                {dustCount} poussière{dustCount > 1 ? 's' : ''} (&lt; 1€) masquée{dustCount > 1 ? 's' : ''} — incluse{dustCount > 1 ? 's' : ''} dans les totaux
+              </p>
+            )}
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

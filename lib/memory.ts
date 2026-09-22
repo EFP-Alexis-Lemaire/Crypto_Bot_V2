@@ -1,4 +1,4 @@
-import { sql } from './db';
+import { sqlForContext, DbContext } from './db';
 
 /**
  * Bot Memory — gives the AI context about its own past decisions and performance.
@@ -49,7 +49,10 @@ interface BotMemory {
   lessons: string[];
 }
 
-export async function getBotMemory(): Promise<BotMemory> {
+// Mémoire scopée par CONTEXTE (DB UAT vs PROD), pas par env (paper/live) :
+// tout l'historique de la base compte, sans mélange entre UAT et prod.
+export async function getBotMemory(ctx: DbContext = 'uat'): Promise<BotMemory> {
+  const sql = sqlForContext(ctx);
   try {
     // Recent trades last 30 days
     const recentTradesRaw = (await sql`

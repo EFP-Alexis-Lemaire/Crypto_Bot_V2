@@ -3,7 +3,7 @@ import { sqlForContext, getDbContext, DbContext } from '@/lib/db';
 import {
   getMarketData, getCryptoNews, getFearGreedIndex, getEurUsdRate,
   getTrendingCoins, getCoinHistory, calculateTechnicalIndicators,
-  getDefiTVL, WATCHLIST_COINS, SYMBOL_TO_COINGECKO_ID,
+  getDefiTVL, getBtcDominance, WATCHLIST_COINS, SYMBOL_TO_COINGECKO_ID,
 } from '@/lib/market-data';
 import { analyzeMarketWithAI } from '@/lib/ai-engine';
 import { getPortfolioSummary, executePaperTrade, savePortfolioSnapshot, checkStopLossAndTakeProfit } from '@/lib/portfolio';
@@ -47,11 +47,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: `Max trades atteint (${tradesExecutedToday}/${maxTrades})`, trades_executed: 0, decisions: [] });
     }
 
-    const [marketData, news, fearGreed, eurUsdRate, trendingCoins, defiTVL] = await Promise.all([
+    const [marketData, news, fearGreed, eurUsdRate, trendingCoins, defiTVL, btcDominance] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getCryptoNews(),
       getFearGreedIndex() as Promise<{ value: number; label: string }>,
-      getEurUsdRate(), getTrendingCoins(), getDefiTVL(),
+      getEurUsdRate(), getTrendingCoins(), getDefiTVL(), getBtcDominance(),
     ]);
 
     const additionalCoins = trendingCoins.filter(id => !WATCHLIST_COINS.includes(id));
@@ -68,12 +68,35 @@ export async function POST(request: Request) {
           const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ?? coin.symbol.toLowerCase();
           const history = await getCoinHistory(coinId, 60);
           const prices = history.map(h => h.price);
-          if (prices.length >= 26) technicalIndicators.push({ symbol: coin.symbol, ...calculateTechnicalIndicators(prices) });
+          const volumes = history.map(h => h.volume ?? 0);
+          if (prices.length >= 26) technicalIndicators.push({
+            symbol: coin.symbol,
+            ...calculateTechnicalIndicators(prices, volumes.some(v => v > 0) ? volumes : undefined),
+          });
         } catch (e) {
           console.warn(`[Trigger ${cycleId}] history skip ${coin.symbol}:`, String(e));
         }
       })
     );
+
+    // Régime de marché : breadth (% > SMA50) + dominance BTC
+    let breadth: number | null = null;
+    {
+      const withSma = technicalIndicators.filter(t => t.sma_50 !== null && t.sma_50 !== undefined);
+      if (withSma.length >= 5) {
+        const above = withSma.filter(t => {
+          const px = allMarketData.find(m => m.symbol === t.symbol)?.price_eur;
+          return px !== undefined && t.sma_50 !== null && t.sma_50 !== undefined && px > (t.sma_50 as number);
+        }).length;
+        breadth = (above / withSma.length) * 100;
+      }
+    }
+    const volMap: Record<string, number> = {};
+    for (const t of technicalIndicators) {
+      if (t.volatility_pct !== null && t.volatility_pct !== undefined && t.volatility_pct > 0) {
+        volMap[t.symbol] = t.volatility_pct;
+      }
+    }
 
     // In live mode: sync real balances from exchanges BEFORE reading portfolio
     if (isLive) await syncPortfolioFromExchange('both');
@@ -124,7 +147,7 @@ export async function POST(request: Request) {
       } catch { /* non-blocking */ }
     }
 
-    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, undefined, ctx);
+    const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, undefined, ctx, volMap);
 
     const recentlySoldResult = (await db`
       SELECT DISTINCT symbol FROM trades
@@ -136,17 +159,20 @@ export async function POST(request: Request) {
       const marketCoin = allMarketData.find(m => m.symbol === slAction.symbol);
       if (!marketCoin) continue;
       const positionValue = portfolio.holdings.find(h => h.symbol === slAction.symbol)?.current_value_eur ?? 0;
-      if (positionValue < 5) {
+      // Palier : 1 = sortie totale (SL / palier 2), 0.5 = TP partiel
+      const sellAmount = positionValue * (slAction.ratio ?? 1);
+      if (sellAmount < 5) {
         await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
           VALUES (${cycleId}, ${slAction.symbol}, 'SKIP',
-            ${`Poussière ignorée: position ${positionValue.toFixed(2)}€ < 5€ minimum exchange. ${slAction.reason}`},
+            ${`Poussière ignorée: vente ${sellAmount.toFixed(2)}€ < 5€ minimum exchange. ${slAction.reason}`},
             0, 0, 'dust-filter', ${currentEnv})`;
         continue;
       }
       const slDecision: BotDecision = {
         symbol: slAction.symbol, action: 'SELL',
-        amount_eur: positionValue,
+        amount_eur: sellAmount,
         reasoning: slAction.reason, confidence: 95, risk_score: 10, timeframe: 'Immédiat',
+        partial: (slAction.ratio ?? 1) < 1,
       };
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
@@ -178,6 +204,8 @@ export async function POST(request: Request) {
         holdings: portfolio.holdings.map(h => ({ symbol: h.symbol, amount: h.amount, current_value_eur: h.current_value_eur, pnl_percent: h.pnl_percent })),
       },
       riskLevel, tradesExecutedToday: tradesExecutedToday + stopLossActions.length, eurUsdRate,
+      dbContext: ctx,
+      marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance },
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
@@ -262,12 +290,20 @@ export async function POST(request: Request) {
         tradesExecuted++;
         // Update portfolio cash in memory so subsequent BUYs in same cycle see updated cash
         if (decision.action === 'SELL') {
-          const fee = decision.amount_eur * 0.0026;
-          portfolio.cash_eur += decision.amount_eur - fee;
-          if (isLive) {
-            const usedExchange = (result as { exchange?: 'kraken' | 'coinbase' }).exchange ?? 'kraken';
-            if (usedExchange === 'kraken') krakenCashMem += decision.amount_eur - fee;
-            else coinbaseCashMem += decision.amount_eur - fee;
+          // Vente splittée : on crédite chaque exchange au net réellement reçu
+          const split = (result as { split?: { kraken: number; coinbase: number } }).split;
+          if (isLive && split) {
+            krakenCashMem += split.kraken;
+            coinbaseCashMem += split.coinbase;
+            portfolio.cash_eur += split.kraken + split.coinbase;
+          } else {
+            const fee = decision.amount_eur * 0.0026;
+            portfolio.cash_eur += decision.amount_eur - fee;
+            if (isLive) {
+              const usedExchange = (result as { exchange?: 'kraken' | 'coinbase' }).exchange ?? 'kraken';
+              if (usedExchange === 'kraken') krakenCashMem += decision.amount_eur - fee;
+              else coinbaseCashMem += decision.amount_eur - fee;
+            }
           }
         } else if (decision.action === 'BUY') {
           portfolio.cash_eur -= decision.amount_eur;
