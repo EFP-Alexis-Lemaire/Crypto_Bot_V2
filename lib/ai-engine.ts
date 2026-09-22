@@ -7,6 +7,10 @@ import {
   RiskLevel,
   RISK_CONFIGS,
   dynamicStopPct,
+  MAJOR_SYMBOLS,
+  MAJORS_RSI_MAX,
+  DIP_MAX_POSITION_PCT,
+  MIN_CASH_RESERVE_PCT,
 } from './types';
 import { logAICost } from './ai-costs';
 import { getDefiTVL } from './market-data';
@@ -43,10 +47,12 @@ interface AnalysisContext {
   eurUsdRate: number;
   // Contexte DB (UAT/PROD) pour la mémoire du bot. Défaut UAT.
   dbContext?: DbContext;
-  // Régime de marché (breadth + dominance BTC) pour calibrer l'agressivité
+  // Régime de marché (breadth + dominance BTC + mode dip) pour calibrer l'agressivité
   marketRegime?: {
     breadth_pct: number | null;   // % des actifs suivis au-dessus de leur SMA50
     btc_dominance: number | null; // dominance BTC (% market cap)
+    dip_mode?: boolean;           // crash objectif : plafond majors relevé
+    btc_drawdown_30d?: number | null; // drawdown BTC vs plus haut 30j (%)
   };
 }
 
@@ -173,11 +179,15 @@ export async function analyzeMarketWithAI(
         }
         // Hard cap risque : taille calibrée sur le stop dynamique (1.5× vol).
         // Ex: budget 15€, stop 6% → 250€ max, même si le cash permet plus.
+        // Mode dip : BTC/ETH peuvent monter jusqu'à 50% (acheter la peur).
         if (d.action === 'BUY') {
           const vol = volBySymbol[d.symbol];
           const stopPct = dynamicStopPct(vol ?? null, riskConfig.stop_loss_pct);
           const riskCap = stopPct > 0 ? riskBudgetEur / (stopPct / 100) : symbolCap;
-          const finalCap = Math.min(symbolCap * 0.80, maxPosEur, riskCap);
+          const posCap = (context.marketRegime?.dip_mode ?? false) && MAJOR_SYMBOLS.includes(d.symbol)
+            ? totalValue * DIP_MAX_POSITION_PCT / 100
+            : maxPosEur;
+          const finalCap = Math.min(symbolCap * 0.80, posCap, riskCap);
           if (d.amount_eur > finalCap) {
             d.amount_eur = parseFloat(Math.max(finalCap, 0).toFixed(2));
           }
@@ -286,13 +296,21 @@ ${breadth !== null && breadth !== undefined && breadth < 30 ? `→ Marché FRAGI
 ${breadth !== null && breadth !== undefined && breadth >= 30 && breadth < 55 ? `→ Marché NEUTRE : tailles normales, setups avec confirmation volume uniquement.` : ''}
 ${breadth !== null && breadth !== undefined && breadth >= 55 ? `→ Marché PORTEUR : tu peux dimensionner plein budget, les breakouts ont le vent dans le dos.` : ''}
 
+=== RÈGLE MAJORS (BTC/ETH) ===
+- Jamais de plafond "trop cher" au feeling : cher + fort = autorisé jusqu'à ${riskConfig.max_position_size_pct}% (plafond normal).
+- Exemption RSI : RSI jusqu'à ${MAJORS_RSI_MAX} accepté UNIQUEMENT pour BTC/ETH si tendance bullish + breadth > 55 (les majors trendent plus longtemps ; la règle RSI>75 ne s'applique pas à eux dans ce cas).
+- MODE DIP : ${(context.marketRegime?.dip_mode ?? false) ? `ACTIF 🩸 (drawdown BTC 30j : ${context.marketRegime?.btc_drawdown_30d !== null && context.marketRegime?.btc_drawdown_30d !== undefined ? context.marketRegime.btc_drawdown_30d.toFixed(1) + '%' : 'N/A'} | Fear&Greed : ${context.fearGreedIndex.value}) → plafond BTC/ETH relevé à ${DIP_MAX_POSITION_PCT}% pour acheter la peur. Le stop dynamique reste OBLIGATOIRE.` : `inactif (drawdown BTC 30j : ${context.marketRegime?.btc_drawdown_30d !== null && context.marketRegime?.btc_drawdown_30d !== undefined ? context.marketRegime.btc_drawdown_30d.toFixed(1) + '%' : 'N/A'}). Il ne s'active que sur crash objectif (drawdown ≤ -15% ou Fear&Greed ≤ 25).`}
+- Cash sanctuarisé : même en dip, toujours ≥ ${MIN_CASH_RESERVE_PCT}% de cash (jamais tapis, garde des munitions pour les alts).
+
 === DIMENSIONNEMENT AU RISQUE RÉEL (OBLIGATOIRE) ===
 Budget risque par trade: ${riskConfig.risk_per_trade_pct}% du total (≈ ${riskBudgetEur.toFixed(2)}€) — un stop-out ne coûte jamais plus.
 Stop dynamique par actif: stop% = 1.5 × vol journalière, borné [${(0.5 * riskConfig.stop_loss_pct).toFixed(1)}%, ${(2 * riskConfig.stop_loss_pct).toFixed(1)}%].
 - amount max "risque" = budget / stop% (ex: budget ${riskBudgetEur.toFixed(2)}€, stop 6% → ${(riskBudgetEur / 0.06).toFixed(0)}€ max)
 - amount final = min(règles cash ci-dessous, max position ${maxPosEur.toFixed(0)}€, montant risque)
 - stop_loss_eur = prix × (1 − stop%) — PAS un % fixe au hasard
-- Le bot vend 50% au take-profit puis laisse courir le reste : dimensionne pour que le reliquat compte encore.
+- Sorties automatiques du bot : 50% au take-profit, solde à 2× l'objectif, stop-loss dynamique
+  et TRAILING STOP (−stop% depuis le plus haut, position gagnante) : inutile de tout vendre au TP,
+  le suiveur protège le reliquat. Dimensionne pour que le reliquat compte encore.
 
 === GESTION DU CASH (RÈGLE ABSOLUE) ===
 Cash disponible: ${context.currentPortfolio.cash_eur.toFixed(2)}€${context.currentPortfolio.cash_kraken_eur !== undefined ? `
@@ -378,7 +396,7 @@ ${portfolioDetail}
 === RÈGLES IMPORTANTES ===
 1. Ne jamais investir plus de ${riskConfig.max_position_size_pct}% du portefeuille total sur une seule position
 2. Garder toujours au minimum 20% en cash (EUR)
-3. Si RSI > 75: signal de survente, prudence sur les BUY
+3. Si RSI > 75: signal de surachat, prudence sur les BUY (sauf BTC/ETH en tendance bullish : voir RÈGLE MAJORS, RSI jusqu'à 80)
 4. Si RSI < 25: signal de survendu, opportunité potentielle
 5. Priorise qualité sur quantité (mieux vaut 1 bon trade que 5 moyens)
 6. Pour les petites cryptos: réduction de position obligatoire (max 5% par position)

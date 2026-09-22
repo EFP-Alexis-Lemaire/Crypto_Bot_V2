@@ -20,6 +20,7 @@ import BotControls from '@/components/BotControls';
 import CycleHistory from '@/components/CycleHistory';
 import CashoutPanel from '@/components/CashoutPanel';
 import MorningReport from '@/components/MorningReport';
+import HealthStrip from '@/components/HealthStrip';
 import ExchangeBalances from '@/components/ExchangeBalances';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
@@ -84,6 +85,8 @@ export default function Dashboard() {
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [marketData, setMarketData] = useState<MarketData[]>([]);
+  const [btcBenchmark, setBtcBenchmark] = useState<Array<{ t: number; v: number }> | null>(null);
+  const [posExchangeFilter, setPosExchangeFilter] = useState<'all' | 'kraken' | 'coinbase'>('all');
   const [news, setNews] = useState<NewsItem[]>([]);
   const [fearGreed, setFearGreed] = useState<{ value: number; label: string }>({
     value: 50,
@@ -98,6 +101,7 @@ export default function Dashboard() {
   const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
   const [performance, setPerformance] = useState<SymbolPerformance[]>([]);
   const [perfTotals, setPerfTotals] = useState<{ realized_eur: number; unrealized_eur: number; fees_eur: number } | null>(null);
+  const [health, setHealth] = useState<React.ComponentProps<typeof HealthStrip>['health']>(null);
   const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
     // Default to PROD when running on production Vercel deployment
     if (typeof window !== 'undefined') {
@@ -130,7 +134,7 @@ export default function Dashboard() {
   const fetchAll = useCallback(async () => {
     const dbHeaders = { 'x-db-context': dbContext };
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, perfRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, perfRes, healthRes] =
         await Promise.all([
           fetch('/api/portfolio', { headers: dbHeaders }),
           fetch('/api/decisions?limit=20', { headers: dbHeaders }),
@@ -141,6 +145,7 @@ export default function Dashboard() {
           fetch('/api/morning-report', { headers: dbHeaders }),
           fetch('/api/ai-costs', { headers: dbHeaders }),
           fetch('/api/performance', { headers: dbHeaders }),
+          fetch('/api/health', { headers: dbHeaders }),
         ]);
 
       if (portfolioRes.ok) {
@@ -164,6 +169,7 @@ export default function Dashboard() {
         setMarketData(data.marketData ?? []);
         setFearGreed(data.fearGreed ?? { value: 50, label: 'Neutral' });
         setNews(data.news ?? []);
+        setBtcBenchmark(data.btcBenchmark ?? null);
       }
 
       if (configRes.ok) {
@@ -190,6 +196,10 @@ export default function Dashboard() {
         const data = await perfRes.json();
         setPerformance(data.performance ?? []);
         setPerfTotals(data.totals ?? null);
+      }
+
+      if (healthRes.ok) {
+        setHealth(await healthRes.json());
       }
 
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
@@ -353,6 +363,9 @@ export default function Dashboard() {
               onRefresh={fetchAll}
             />
 
+            {/* Santé des connexions */}
+            <HealthStrip health={health} />
+
             {/* KPI Cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
@@ -434,6 +447,8 @@ export default function Dashboard() {
                   currentValue={portfolio?.total_value_eur}
                   currentCash={portfolio?.cash_eur}
                   currentCrypto={portfolio?.crypto_value_eur}
+                  trades={trades.map(t => ({ executed_at: t.executed_at, action: t.action, symbol: t.symbol }))}
+                  benchmark={btcBenchmark}
                 />
               </div>
 
@@ -452,19 +467,41 @@ export default function Dashboard() {
             {/* Performances par crypto (meilleures → pires) */}
             <PerformanceTable rows={performance} totals={perfTotals} />
 
-            {/* Holdings Table — poussières (< 1€) masquées */}
+            {/* Holdings Table — poussières (< 1€) masquées, filtre exchange */}
             {portfolio && portfolio.holdings.length > 0 && (() => {
-              const visibleHoldings = portfolio.holdings.filter(h => h.current_value_eur >= 1);
-              const dustCount = portfolio.holdings.length - visibleHoldings.length;
+              const dustFiltered = portfolio.holdings.filter(h => h.current_value_eur >= 1);
+              const dustCount = portfolio.holdings.length - dustFiltered.length;
+              // Filtre exchange : 'both'/absent (paper) reste visible dans les deux filtres
+              const visibleHoldings = posExchangeFilter === 'all'
+                ? dustFiltered
+                : dustFiltered.filter(h =>
+                    h.source === undefined ||
+                    h.source === posExchangeFilter ||
+                    h.source === 'both'
+                  );
+              const FilterBtn = ({ v, label }: { v: 'all' | 'kraken' | 'coinbase'; label: string }) => (
+                <button
+                  onClick={() => setPosExchangeFilter(v)}
+                  className={`px-2 py-0.5 rounded-full text-xs font-semibold transition-all ${posExchangeFilter === v ? 'bg-blue-500/20 text-blue-300' : 'text-gray-500 hover:text-gray-300'}`}
+                >{label}</button>
+              );
               return (
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                <h3 className="text-white font-semibold mb-4">Positions ouvertes</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-white font-semibold">Positions ouvertes</h3>
+                  <div className="flex items-center gap-1">
+                    <FilterBtn v="all" label="Tous" />
+                    <FilterBtn v="kraken" label="Kraken" />
+                    <FilterBtn v="coinbase" label="Coinbase" />
+                  </div>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="text-gray-500 border-b border-gray-800">
                         <th className="text-left py-2 px-3">Crypto</th>
                         <th className="text-right py-2 px-3">Quantité</th>
+                        <th className="text-right py-2 px-3 hidden sm:table-cell">Exchange</th>
                         <th className="text-right py-2 px-3">Prix moyen</th>
                         <th className="text-right py-2 px-3">Prix actuel</th>
                         <th className="text-right py-2 px-3">Valeur</th>
@@ -482,6 +519,21 @@ export default function Dashboard() {
                             {h.amount < 0.001
                               ? h.amount.toFixed(6)
                               : h.amount.toFixed(4)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right hidden sm:table-cell">
+                            {h.source ? (
+                              <span className={`text-xs px-2 py-0.5 rounded-full ${
+                                h.source === 'kraken'
+                                  ? 'bg-purple-500/15 text-purple-400'
+                                  : h.source === 'coinbase'
+                                  ? 'bg-blue-500/15 text-blue-400'
+                                  : 'bg-gray-700 text-gray-300'
+                              }`}>
+                                {h.source === 'kraken' ? 'Kraken' : h.source === 'coinbase' ? 'Coinbase' : 'K + CB'}
+                              </span>
+                            ) : (
+                              <span className="text-gray-600 text-xs">—</span>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 text-right text-gray-400">
                             {h.avg_buy_price_eur.toFixed(4)}€
@@ -590,7 +642,30 @@ export default function Dashboard() {
                 <Activity className="w-5 h-5 text-purple-400" />
                 Historique des trades
               </h2>
-              <span className="text-gray-500 text-sm">{trades.length} trades</span>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-500 text-sm">{trades.length} trades</span>
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch('/api/export-trades', { headers: { 'x-db-context': dbContext } });
+                      if (!res.ok) return;
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      const cd = res.headers.get('Content-Disposition') ?? '';
+                      const m = cd.match(/filename="([^"]+)"/);
+                      a.download = m?.[1] ?? `trades-${dbContext}.csv`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    } catch { /* silent */ }
+                  }}
+                  className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-gray-300 hover:text-white text-xs font-semibold transition-all"
+                  title="Export CSV (compatible Excel, plus-values FIFO incluses)"
+                >
+                  ⬇ Export CSV
+                </button>
+              </div>
             </div>
 
             {trades.length === 0 ? (

@@ -547,6 +547,24 @@ export function calculateTechnicalIndicators(
   };
 }
 
+// Benchmark BTC normalisé (base 100) pour comparer le bot au simple "hold BTC".
+// Historique 31j, cache 30 min, null si inaccessible (non-bloquant).
+let _benchCache: { points: Array<{ t: number; v: number }>; at: number } | null = null;
+export async function getBtcBenchmark(): Promise<Array<{ t: number; v: number }> | null> {
+  if (_benchCache && Date.now() - _benchCache.at < 30 * 60 * 1000) return _benchCache.points;
+  try {
+    const history = await getCoinHistory('bitcoin', 31);
+    if (history.length < 5) return null;
+    const base = history[0].price;
+    if (!(base > 0)) return null;
+    const points = history.map(h => ({ t: h.timestamp, v: (h.price / base) * 100 }));
+    _benchCache = { points, at: Date.now() };
+    return points;
+  } catch {
+    return null;
+  }
+}
+
 // Dominance BTC (%) — régime de marché (altseason vs fuite vers BTC).
 // CoinGecko /global, cache 10 min, null si inaccessible (non-bloquant).
 let _globalCache: { btc: number; at: number } | null = null;

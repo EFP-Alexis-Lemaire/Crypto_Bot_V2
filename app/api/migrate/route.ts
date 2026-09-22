@@ -119,6 +119,12 @@ export async function GET(request: Request) {
       migrations.push('portfolio.partial_tp_taken: colonne créée');
     } catch { migrations.push('portfolio.partial_tp_taken: skipped'); }
 
+    // 8. portfolio.highest_price_eur : plus haut atteint depuis l'achat (trailing stop)
+    try {
+      await sql`ALTER TABLE portfolio ADD COLUMN IF NOT EXISTS highest_price_eur DECIMAL(20, 8)`;
+      migrations.push('portfolio.highest_price_eur: colonne créée');
+    } catch { migrations.push('portfolio.highest_price_eur: skipped'); }
+
     // Return current state for verification
     const config = (await sql`SELECT key, value FROM bot_config ORDER BY key`) as Array<{ key: string; value: string }>;
     const portfolioRows = (await sql`SELECT symbol, amount, env FROM portfolio ORDER BY env, symbol`) as Array<{ symbol: string; amount: string; env: string }>;

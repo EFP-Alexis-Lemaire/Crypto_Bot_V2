@@ -192,10 +192,11 @@ export async function executeLiveTrade(
           ? (baseAmount * prevAvg + actualAmount) / syncedAmount
           : actualAmount / Math.max(cryptoAmount, 1e-12);
         if (newAvg > 0) {
-          // Renfort de position : l'échelle des TP repart de zéro (flag partiel reset).
-          // Fallback sans flag si la migration n'a pas été jouée.
+          // Renfort de position : l'échelle des TP repart de zéro (flag partiel reset)
+          // et le trailing stop repart du prix d'achat (highest reset).
+          // Fallback sans nouvelles colonnes si la migration n'a pas été jouée.
           try {
-            await db`UPDATE portfolio SET avg_buy_price_eur = ${newAvg}, partial_tp_taken = FALSE, updated_at = NOW() WHERE symbol = ${decision.symbol} AND env = 'live'`;
+            await db`UPDATE portfolio SET avg_buy_price_eur = ${newAvg}, partial_tp_taken = FALSE, highest_price_eur = ${currentPrice.price_eur}, updated_at = NOW() WHERE symbol = ${decision.symbol} AND env = 'live'`;
           } catch {
             await db`UPDATE portfolio SET avg_buy_price_eur = ${newAvg}, updated_at = NOW() WHERE symbol = ${decision.symbol} AND env = 'live'`;
           }

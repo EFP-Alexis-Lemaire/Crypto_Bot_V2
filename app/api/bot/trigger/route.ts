@@ -10,7 +10,7 @@ import { getPortfolioSummary, executePaperTrade, savePortfolioSnapshot, checkSto
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/lib/exchanges/coinbase';
 import { sendTradeAlert } from '@/lib/telegram';
-import { TechnicalIndicators, BotDecision } from '@/lib/types';
+import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
 
 export const maxDuration = 60;
@@ -62,12 +62,14 @@ export async function POST(request: Request) {
     }
 
     const technicalIndicators: TechnicalIndicators[] = [];
+    let btcPrices: number[] = [];
     await Promise.all(
       allMarketData.slice(0, 15).map(async coin => {
         try {
           const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ?? coin.symbol.toLowerCase();
           const history = await getCoinHistory(coinId, 60);
           const prices = history.map(h => h.price);
+          if (coin.symbol === 'BTC') btcPrices = prices;
           const volumes = history.map(h => h.volume ?? 0);
           if (prices.length >= 26) technicalIndicators.push({
             symbol: coin.symbol,
@@ -97,6 +99,18 @@ export async function POST(request: Request) {
         volMap[t.symbol] = t.volatility_pct;
       }
     }
+
+    // Mode dip (crash objectif) : drawdown BTC 30j <= -15% OU Fear&Greed <= 25
+    let btcDrawdown: number | null = null;
+    if (btcPrices.length >= 31) {
+      const window = btcPrices.slice(-31);
+      const high = Math.max(...window);
+      const last = window[window.length - 1];
+      if (high > 0) btcDrawdown = ((last - high) / high) * 100;
+    }
+    const dipMode = (btcDrawdown !== null && btcDrawdown <= DIP_DRAWDOWN_PCT)
+      || fearGreed.value <= DIP_FEAR_GREED_MAX;
+    if (dipMode) console.log(`[Trigger ${cycleId}] DIP MODE actif (drawdown BTC: ${btcDrawdown?.toFixed(1)}%, F&G: ${fearGreed.value})`);
 
     // In live mode: sync real balances from exchanges BEFORE reading portfolio
     if (isLive) await syncPortfolioFromExchange('both');
@@ -151,7 +165,7 @@ export async function POST(request: Request) {
 
     const recentlySoldResult = (await db`
       SELECT DISTINCT symbol FROM trades
-      WHERE action = 'SELL' AND executed_at > NOW() - INTERVAL '4 hours' AND env = ${currentEnv}
+      WHERE action = 'SELL' AND executed_at > NOW() - INTERVAL '2 hours' AND env = ${currentEnv}
     `) as Array<{ symbol: string }>;
     const recentlySold = new Set(recentlySoldResult.map(r => r.symbol));
 
@@ -177,7 +191,9 @@ export async function POST(request: Request) {
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
         : await executePaperTrade(slDecision, marketCoin, eurUsdRate, undefined, ctx);
-      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive, ctx);
+      const slHeld = portfolio.holdings.find(h => h.symbol === slAction.symbol);
+      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive, ctx,
+        slHeld ? { eur: slHeld.pnl_eur, pct: slHeld.pnl_percent } : undefined);
       await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, market_data, technical_indicators, env)
         VALUES (${cycleId}, ${slAction.symbol}, 'SELL', ${slAction.reason}, 95, 10, 'stop-loss-trigger',
           ${JSON.stringify({ price: marketCoin.price_eur })}, ${JSON.stringify({})}, ${currentEnv})`;
@@ -205,7 +221,7 @@ export async function POST(request: Request) {
       },
       riskLevel, tradesExecutedToday: tradesExecutedToday + stopLossActions.length, eurUsdRate,
       dbContext: ctx,
-      marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance },
+      marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance, dip_mode: dipMode, btc_drawdown_30d: btcDrawdown },
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
@@ -213,6 +229,8 @@ export async function POST(request: Request) {
     let coinbaseCashMem = portfolio.cash_by_exchange?.coinbase ?? 0;
 
     let tradesExecuted = 0;
+    // Compteur sectoriel anti-corrélation (max 2 BUYs/secteur/cycle)
+    const sectorBuys: Record<string, number> = {};
 
     if (decisions.length === 0) {
       await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
@@ -224,7 +242,7 @@ export async function POST(request: Request) {
     for (const decision of decisions) {
       if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
         await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
-          VALUES (${cycleId}, ${decision.symbol}, 'SKIP', ${'Cooldown: vendu dans les 4h'}, 0, 0, 'cooldown-rule', ${currentEnv})`;
+          VALUES (${cycleId}, ${decision.symbol}, 'SKIP', ${'Cooldown: vendu dans les 2h'}, 0, 0, 'cooldown-rule', ${currentEnv})`;
         continue;
       }
       if (decision.action === 'HOLD' || decision.action === 'SKIP') {
@@ -260,6 +278,18 @@ export async function POST(request: Request) {
         }
       }
 
+      // Garde-fou corrélation : max 2 BUYs du même secteur par cycle
+      if (decision.action === 'BUY') {
+        const sector = sectorOf(decision.symbol);
+        if ((sectorBuys[sector] ?? 0) >= MAX_BUYS_PER_SECTOR_PER_CYCLE) {
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Corrélation: secteur ${sector} déjà acheté ${MAX_BUYS_PER_SECTOR_PER_CYCLE}× ce cycle. Diversification forcée.`},
+              0, 0, 'correlation-guard', ${currentEnv})`;
+          continue;
+        }
+      }
+
       // Hard cap: en live, un BUY est payé par UN SEUL exchange -> cap à 80%
       // du max des deux soldes (jamais du total consolidé). Symboles non-tradables
       // sur Coinbase -> cash Kraken seul. En paper, cap au cash.
@@ -288,6 +318,10 @@ export async function POST(request: Request) {
         : await executePaperTrade(decision, marketCoin, eurUsdRate, undefined, ctx);
       if (result.success) {
         tradesExecuted++;
+        if (decision.action === 'BUY') {
+          const sector = sectorOf(decision.symbol);
+          sectorBuys[sector] = (sectorBuys[sector] ?? 0) + 1;
+        }
         // Update portfolio cash in memory so subsequent BUYs in same cycle see updated cash
         if (decision.action === 'SELL') {
           // Vente splittée : on crédite chaque exchange au net réellement reçu
@@ -324,7 +358,9 @@ export async function POST(request: Request) {
           ${JSON.stringify({ price_eur: marketCoin.price_eur, change_24h: marketCoin.change_24h, fear_greed: fearGreed.value })},
           ${JSON.stringify(techIndicator ?? {})}, ${relevantNews.map(n => n.title).join(' | ')}, ${currentEnv})`;
 
-      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive, ctx);
+      const held = portfolio.holdings.find(h => h.symbol === decision.symbol);
+      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive, ctx,
+        held ? { eur: held.pnl_eur, pct: held.pnl_percent } : undefined);
     }
 
     const updatedPortfolio = await getPortfolioSummary(allMarketData, undefined, ctx);

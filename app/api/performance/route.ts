@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { sqlForContext, getDbContext } from '@/lib/db';
 import { getMarketData, WATCHLIST_COINS } from '@/lib/market-data';
 import { getPortfolioSummary } from '@/lib/portfolio';
+import { computeFifo } from '@/lib/fifo';
 
 type Row = Record<string, unknown>;
 const num = (v: unknown): number => parseFloat(String(v ?? 0)) || 0;
@@ -21,8 +22,6 @@ export interface SymbolPerformance {
   current_price_eur: number;
 }
 
-interface Lot { qty: number; unitCost: number }
-
 // GET : performance par crypto — réalisé (FIFO sur l'historique des trades)
 // + latent (positions actuelles) = total. Trié du meilleur au pire.
 export async function GET(request: Request) {
@@ -40,39 +39,16 @@ export async function GET(request: Request) {
       LIMIT 5000
     `) as Row[];
 
-    // FIFO : file de lots d'achat (quantité, coût unitaire frais inclus)
-    const lots: Record<string, Lot[]> = {};
-    const stats: Record<string, { buys: number; sells: number; volume: number; fees: number; realized: number }> = {};
-    const touch = (s: string) => (stats[s] ??= { buys: 0, sells: 0, volume: 0, fees: 0, realized: 0 });
-
-    for (const t of trades) {
-      const sym = String(t.symbol);
-      const qty = num(t.amount);
-      const total = num(t.total_eur);
-      const fee = num(t.fee_eur);
-      if (qty <= 0) continue;
-      const st = touch(sym);
-      st.fees += fee;
-      if (String(t.action) === 'BUY') {
-        st.buys += 1;
-        st.volume += total;
-        (lots[sym] ??= []).push({ qty, unitCost: total / qty });
-      } else {
-        st.sells += 1;
-        const netPerUnit = total / qty; // total_eur = net reçu (frais déduits)
-        let remaining = qty;
-        const queue = lots[sym] ?? [];
-        while (remaining > 1e-12 && queue.length > 0) {
-          const lot = queue[0];
-          const matched = Math.min(lot.qty, remaining);
-          st.realized += matched * (netPerUnit - lot.unitCost);
-          lot.qty -= matched;
-          remaining -= matched;
-          if (lot.qty <= 1e-12) queue.shift();
-        }
-        // Vente sans lot connu (ex: position pré-existante) : gain non attribuable -> ignoré
-      }
-    }
+    // FIFO partagé (même convention que l'export fiscal)
+    const { perSymbol: stats } = computeFifo(
+      trades.map(t => ({
+        symbol: String(t.symbol),
+        action: String(t.action),
+        amount: num(t.amount),
+        total_eur: num(t.total_eur),
+        fee_eur: num(t.fee_eur),
+      }))
+    );
 
     // Latent : positions actuelles valorisées au prix marché
     const marketData = await getMarketData(WATCHLIST_COINS);
@@ -87,7 +63,8 @@ export async function GET(request: Request) {
         avg: h.avg_buy_price_eur,
         price: h.current_price_eur,
       };
-      touch(h.symbol);
+      // Position sans trades dans l'historique (ex: pré-existante) : ligne à zéro
+      stats[h.symbol] ??= { buys: 0, sells: 0, volume_eur: 0, fees_eur: 0, realized_eur: 0 };
     }
 
     const rows: SymbolPerformance[] = Object.entries(stats).map(([symbol, st]) => {
@@ -98,11 +75,11 @@ export async function GET(request: Request) {
         name: priceMap[symbol]?.name ?? symbol,
         buys: st.buys,
         sells: st.sells,
-        volume_eur: Number(st.volume.toFixed(2)),
-        fees_eur: Number(st.fees.toFixed(2)),
-        realized_eur: Number(st.realized.toFixed(2)),
+        volume_eur: st.volume_eur,
+        fees_eur: st.fees_eur,
+        realized_eur: st.realized_eur,
         unrealized_eur: Number(unrealized.toFixed(2)),
-        total_eur: Number((st.realized + unrealized).toFixed(2)),
+        total_eur: Number((st.realized_eur + unrealized).toFixed(2)),
         holding_value_eur: Number((h?.value ?? 0).toFixed(2)),
         avg_buy_price_eur: Number((h?.avg ?? 0).toFixed(6)),
         current_price_eur: Number(((h?.price ?? priceMap[symbol]?.price) ?? 0).toFixed(6)),

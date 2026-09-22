@@ -132,7 +132,10 @@ export async function sendTradeAlert(
   price_eur: number,
   message: string,
   isLiveMode?: boolean,
-  ctx?: DbContext
+  ctx?: DbContext,
+  // P&L réel de la position (calculé par le code) : affiché en plus du
+  // raisonnement IA, qui peut halluciner des P&L fantaisistes
+  positionPnl?: { eur: number; pct: number }
 ): Promise<void> {
   const actionEmoji =
     decision.action === 'BUY' ? '🟢 ACHAT' : decision.action === 'SELL' ? '🔴 VENTE' : '⏸';
@@ -146,7 +149,8 @@ ${statusEmoji} <b>${actionEmoji} ${decision.symbol}</b>
   Risque: ${decision.risk_score}/100
   ${decision.stop_loss_eur ? `Stop-loss: ${decision.stop_loss_eur.toFixed(4)}€` : ''}
   ${decision.take_profit_eur ? `Take-profit: ${decision.take_profit_eur.toFixed(4)}€` : ''}
-  
+  ${positionPnl ? `📊 Position réelle: ${positionPnl.eur >= 0 ? '+' : ''}${positionPnl.eur.toFixed(2)}€ (${positionPnl.pct >= 0 ? '+' : ''}${positionPnl.pct.toFixed(2)}%)` : ''}
+
 💭 ${decision.reasoning.slice(0, 200)}
 ${message ? `\n📝 ${message}` : ''}
   `.trim();

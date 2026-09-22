@@ -32,6 +32,9 @@ export async function getPortfolioSummary(
   // Le sync préserve les avg_buy_price_eur (base des P&L et SL/TP).
   let cashKraken = 0;
   let cashCoinbase = 0;
+  // Symboles détenus par exchange (live) pour la provenance des positions
+  const krakenSymbols = new Set<string>();
+  const coinbaseSymbols = new Set<string>();
   if (env === 'live') {
     try {
       const { getKrakenBalance } = await import('./exchanges/kraken');
@@ -45,12 +48,18 @@ export async function getPortfolioSummary(
       let cashEur = 0;
       try {
         const kb = await getKrakenBalance();
+        for (const [sym, amt] of Object.entries(kb)) {
+          if (amt > 0) krakenSymbols.add(sym);
+        }
         cashKraken = (kb['EUR'] ?? 0) + (kb['EURC'] ?? 0) + (kb['EURS'] ?? 0)
           + (kb['USD'] ?? 0) * 0.92 + (kb['USDC'] ?? 0) * 0.92 + (kb['USDT'] ?? 0) * 0.92;
         cashEur += cashKraken;
       } catch {}
       try {
         const cb = await getCoinbaseBalance();
+        for (const [sym, amt] of Object.entries(cb)) {
+          if (amt > 0) coinbaseSymbols.add(sym);
+        }
         cashCoinbase = (cb['EUR'] ?? 0) + (cb['EURC'] ?? 0) + (cb['EURS'] ?? 0)
           + (cb['USD'] ?? 0) * 0.92 + (cb['USDC'] ?? 0) * 0.92 + (cb['USDT'] ?? 0) * 0.92;
         cashEur += cashCoinbase;
@@ -108,6 +117,8 @@ export async function getPortfolioSummary(
     const pnl = currentValue - costBasis;
     const pnlPercent = costBasis > 0 ? (pnl / costBasis) * 100 : 0;
     crypto_value_eur += currentValue;
+    const onKraken = krakenSymbols.has(symbol);
+    const onCoinbase = coinbaseSymbols.has(symbol);
     holdingDetails.push({
       symbol,
       name: marketData.find(m => m.symbol === symbol)?.name ?? symbol,
@@ -117,6 +128,9 @@ export async function getPortfolioSummary(
       current_value_eur: currentValue,
       pnl_eur: pnl,
       pnl_percent: pnlPercent,
+      ...(env === 'live' && (onKraken || onCoinbase)
+        ? { source: (onKraken && onCoinbase ? 'both' : onKraken ? 'kraken' : 'coinbase') as 'kraken' | 'coinbase' | 'both' }
+        : {}),
     });
   }
 
@@ -205,11 +219,12 @@ export async function executePaperTrade(
         const existingAvg = parseFloat(str(existing[0], 'avg_buy_price_eur'));
         const newTotal = existingAmount + cryptoAmount;
         const newAvg = (existingAmount * existingAvg + cryptoAmount * currentPrice.price_eur) / newTotal;
-        // Renfort : l'échelle des TP repart de zéro (flag partiel reset).
-        // Fallback sans flag si la migration n'a pas été jouée (colonne absente).
+        // Renfort : l'échelle des TP repart de zéro (flag partiel reset) et le
+        // trailing repart du prix d'achat (highest reset).
+        // Fallback sans nouvelles colonnes si la migration n'a pas été jouée.
         try {
           await db`
-            UPDATE portfolio SET amount = ${newTotal}, avg_buy_price_eur = ${newAvg}, partial_tp_taken = FALSE, updated_at = NOW()
+            UPDATE portfolio SET amount = ${newTotal}, avg_buy_price_eur = ${newAvg}, partial_tp_taken = FALSE, highest_price_eur = ${currentPrice.price_eur}, updated_at = NOW()
             WHERE symbol = ${decision.symbol} AND env = ${env}
           `;
         } catch {
@@ -383,8 +398,23 @@ export async function checkStopLossAndTakeProfit(
     // Stop-loss DYNAMIQUE : 1.5× la volatilité, ancré à la config utilisateur
     const dynStop = dynamicStopPct(volBySymbol?.[symbol] ?? null, stopLossCfg);
 
+    // Trailing stop : suit le plus haut depuis l'achat (persisté en DB).
+    // Laisse courir les gagnants, sort si le prix retrace de dynStop depuis le sommet.
+    let highest = parseFloat(str(holding, 'highest_price_eur'));
+    if (!(highest > 0)) highest = market.price_eur; // init (nouvelle position / pré-migration)
+    if (market.price_eur > highest) highest = market.price_eur;
+    try {
+      await db`UPDATE portfolio SET highest_price_eur = ${highest}, updated_at = NOW() WHERE symbol = ${symbol} AND env = ${env}`;
+    } catch { /* colonne absente pré-migration : trailing désactivé, SL/TP classiques */ }
+    const drawdownFromHigh = highest > 0 ? ((market.price_eur - highest) / highest) * 100 : 0;
+
     if (change <= -dynStop) {
       actions.push({ symbol, action: 'SELL', ratio: 1, reason: `Stop-loss: ${change.toFixed(2)}% depuis achat à ${avgBuyPrice.toFixed(4)}€ (stop dyn ${dynStop.toFixed(1)}%)` });
+    } else if (drawdownFromHigh <= -dynStop && highest > avgBuyPrice && change > 0) {
+      // Retracement depuis le sommet alors que la position est encore gagnante :
+      // on sécurise tout (le TP partiel a déjà pris 50% si le palier 1 est passé).
+      // Le "change > 0" évite de vendre à perte sur un micro-retracement.
+      actions.push({ symbol, action: 'SELL', ratio: 1, reason: `Trailing stop: ${drawdownFromHigh.toFixed(2)}% depuis le plus haut à ${highest.toFixed(4)}€ (position +${change.toFixed(1)}% vs achat)` });
     } else if (change >= takeProfit2Cfg && partialTaken[symbol]) {
       // Second palier : le reliquat sort, la tendance a doublé l'objectif
       actions.push({ symbol, action: 'SELL', ratio: 1, reason: `Take-profit palier 2: +${change.toFixed(2)}% (objectif initial +${takeProfitCfg}%), sortie du reliquat` });

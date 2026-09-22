@@ -84,6 +84,7 @@ export async function initializeDatabase() {
       avg_buy_price_eur DECIMAL(20, 8) NOT NULL DEFAULT 0,
       env VARCHAR(10) NOT NULL DEFAULT 'paper',
       partial_tp_taken BOOLEAN NOT NULL DEFAULT FALSE,
+      highest_price_eur DECIMAL(20, 8),
       updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )
   `;

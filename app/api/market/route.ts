@@ -1,16 +1,17 @@
 import { NextResponse } from 'next/server';
-import { getMarketData, getFearGreedIndex, getEurUsdRate, getCryptoNews } from '@/lib/market-data';
+import { getMarketData, getFearGreedIndex, getEurUsdRate, getCryptoNews, getBtcBenchmark } from '@/lib/market-data';
 import { WATCHLIST_COINS } from '@/lib/market-data';
 
 export const revalidate = 60; // Cache for 60 seconds
 
 export async function GET() {
   try {
-    const [marketData, fearGreed, eurUsdRate, news] = await Promise.all([
+    const [marketData, fearGreed, eurUsdRate, news, btcBenchmark] = await Promise.all([
       getMarketData(WATCHLIST_COINS),
       getFearGreedIndex(),
       getEurUsdRate(),
       getCryptoNews(),
+      getBtcBenchmark(),
     ]);
 
     return NextResponse.json({
@@ -18,6 +19,7 @@ export async function GET() {
       fearGreed,
       eurUsdRate,
       news: news.slice(0, 10),
+      btcBenchmark,
       updatedAt: new Date().toISOString(),
     });
   } catch (error) {

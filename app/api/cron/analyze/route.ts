@@ -23,7 +23,7 @@ import {
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/lib/exchanges/coinbase';
 import { sendTradeAlert } from '@/lib/telegram';
-import { TechnicalIndicators, BotDecision } from '@/lib/types';
+import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX } from '@/lib/types';
 import { cronUnauthorized } from '@/lib/cron-auth';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -138,6 +138,7 @@ export async function GET(request: Request) {
     const topCoins = allMarketData.slice(0, 15);
 
     // Un coin invalide (ex: trending "gram" délisté) ne doit jamais faire échouer le cycle
+    let btcPrices: number[] = [];
     await Promise.all(
       topCoins.map(async coin => {
         try {
@@ -145,6 +146,7 @@ export async function GET(request: Request) {
             coin.symbol.toLowerCase();
           const history = await getCoinHistory(coinId, 60);
           const prices = history.map(h => h.price);
+          if (coin.symbol === 'BTC') btcPrices = prices;
           const volumes = history.map(h => h.volume ?? 0);
 
           if (prices.length >= 26) {
@@ -179,6 +181,19 @@ export async function GET(request: Request) {
       }
     }
 
+    // Mode dip (crash objectif) : drawdown BTC 30j <= -15% OU Fear&Greed <= 25
+    // → plafond BTC/ETH relevé à 50% pour acheter la peur
+    let btcDrawdown: number | null = null;
+    if (btcPrices.length >= 31) {
+      const window = btcPrices.slice(-31);
+      const high = Math.max(...window);
+      const last = window[window.length - 1];
+      if (high > 0) btcDrawdown = ((last - high) / high) * 100;
+    }
+    const dipMode = (btcDrawdown !== null && btcDrawdown <= DIP_DRAWDOWN_PCT)
+      || fearGreed.value <= DIP_FEAR_GREED_MAX;
+    if (dipMode) console.log(`[Bot Cycle ${cycleId}] DIP MODE actif (drawdown BTC: ${btcDrawdown?.toFixed(1)}%, F&G: ${fearGreed.value})`);
+
     // Sync from exchange if live mode (live trader écrit en PROD : ne sync que si on est sur la DB prod)
     if (isLive && dbContext === 'prod') {
       await syncPortfolioFromExchange('both');
@@ -196,7 +211,7 @@ export async function GET(request: Request) {
     const recentlySoldResult = (await db`
       SELECT DISTINCT symbol FROM trades
       WHERE action = 'SELL'
-      AND executed_at > NOW() - INTERVAL '4 hours'
+      AND executed_at > NOW() - INTERVAL '2 hours'
       AND env = ${currentEnv}
     `) as Array<{ symbol: string }>;
     const recentlySold = new Set(recentlySoldResult.map(r => r.symbol));
@@ -240,7 +255,9 @@ export async function GET(request: Request) {
       const result = isLive
         ? await executeLiveTrade(slDecision, marketCoin, eurUsdRate)
         : await executePaperTrade(slDecision, marketCoin, eurUsdRate, currentEnv, dbContext);
-      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive, dbContext);
+      const slHeld = portfolio.holdings.find(h => h.symbol === slAction.symbol);
+      await sendTradeAlert(slDecision, result.success, marketCoin.price_eur, result.message, isLive, dbContext,
+        slHeld ? { eur: slHeld.pnl_eur, pct: slHeld.pnl_percent } : undefined);
       // Log decision
       await db`
         INSERT INTO bot_decisions
@@ -292,7 +309,7 @@ export async function GET(request: Request) {
       tradesExecutedToday: tradesExecutedToday + stopLossActions.length,
       eurUsdRate,
       dbContext,
-      marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance },
+      marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance, dip_mode: dipMode, btc_drawdown_30d: btcDrawdown },
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
@@ -315,15 +332,17 @@ export async function GET(request: Request) {
 
     // Execute decisions
     const executedTrades: { decision: BotDecision; result: { success: boolean; message: string } }[] = [];
+    // Compteur sectoriel anti-corrélation (max 2 BUYs/secteur/cycle)
+    const sectorBuys: Record<string, number> = {};
 
     for (const decision of decisions) {
       // Block immediate rebuy of recently sold symbols
       if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
-        console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — sold within last 4h`);
+        console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — sold within last 2h`);
         await db`
           INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
           VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
-            ${'Rachat bloqué: ' + decision.symbol + ' a été vendu dans les 4 dernières heures. Délai de cooldown respecté.'},
+            ${'Rachat bloqué: ' + decision.symbol + ' a été vendu dans les 2 dernières heures. Délai de cooldown respecté (un creux peut justifier un rachat rapide après ce délai).'},
             0, 0, 'cooldown-rule', ${currentEnv})
         `;
         continue;
@@ -371,6 +390,20 @@ export async function GET(request: Request) {
         }
       }
 
+      // Garde-fou corrélation : max 2 BUYs du même secteur par cycle
+      // (évite 3 paris corrélés type UNI+AAVE+CRV le même jour)
+      if (decision.action === 'BUY') {
+        const sector = sectorOf(decision.symbol);
+        if ((sectorBuys[sector] ?? 0) >= MAX_BUYS_PER_SECTOR_PER_CYCLE) {
+          console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — secteur ${sector} déjà à ${MAX_BUYS_PER_SECTOR_PER_CYCLE} ce cycle`);
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Corrélation: secteur ${sector} déjà acheté ${MAX_BUYS_PER_SECTOR_PER_CYCLE}× ce cycle. Diversification forcée.`},
+              0, 0, 'correlation-guard', ${currentEnv})`;
+          continue;
+        }
+      }
+
       // Hard cap: en live, un BUY est payé par UN SEUL exchange -> cap à 80%
       // du max des deux soldes (jamais du total consolidé). Symboles non-tradables
       // sur Coinbase -> cash Kraken seul. En paper, cap au cash.
@@ -397,6 +430,10 @@ export async function GET(request: Request) {
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
         : await executePaperTrade(decision, marketCoin, eurUsdRate, currentEnv, dbContext);
       executedTrades.push({ decision, result });
+      if (result.success && decision.action === 'BUY') {
+        const sector = sectorOf(decision.symbol);
+        sectorBuys[sector] = (sectorBuys[sector] ?? 0) + 1;
+      }
 
       // Màj mémoire du cash par exchange après chaque trade réussi
       // (pour que les BUYs suivants du même cycle voient le cash restant)
@@ -452,7 +489,9 @@ export async function GET(request: Request) {
         )
       `;
 
-      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive, dbContext);
+      const held = portfolio.holdings.find(h => h.symbol === decision.symbol);
+      await sendTradeAlert(decision, result.success, marketCoin.price_eur, result.message, isLive, dbContext,
+        held ? { eur: held.pnl_eur, pct: held.pnl_percent } : undefined);
     }
 
     // Save portfolio snapshot

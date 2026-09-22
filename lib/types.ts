@@ -72,6 +72,8 @@ export interface PortfolioHolding {
   current_value_eur: number;
   pnl_eur: number;
   pnl_percent: number;
+  // Exchange(s) détenant l'actif (mode live uniquement)
+  source?: 'kraken' | 'coinbase' | 'both';
 }
 
 export interface PortfolioSummary {
@@ -130,6 +132,30 @@ export const RISK_CONFIGS: Record<RiskLevel, RiskConfig> = {
     risk_per_trade_pct: 2.5,
   },
 };
+
+// Secteurs pour la limite de corrélation (max N BUYs du même secteur par cycle)
+export const SECTOR_MAP: Record<string, string> = {
+  UNI: 'DEFI', AAVE: 'DEFI', LINK: 'DEFI', CRV: 'DEFI', MKR: 'DEFI',
+  SOL: 'L1', ADA: 'L1', DOT: 'L1', AVAX: 'L1', NEAR: 'L1', ALGO: 'L1',
+  SUI: 'L1', APT: 'L1', SEI: 'L1', TIA: 'L1', TON: 'L1', INJ: 'L1',
+  ARB: 'L2', OP: 'L2', MATIC: 'L2', STRK: 'L2',
+  BTC: 'MAJOR', ETH: 'MAJOR', XRP: 'MAJOR', LTC: 'MAJOR', ETC: 'MAJOR',
+};
+export const MAX_BUYS_PER_SECTOR_PER_CYCLE = 2;
+export const sectorOf = (symbol: string): string => SECTOR_MAP[symbol] ?? 'OTHER';
+
+// --- Règle majors (BTC/ETH) : participer aux tendances + acheter la peur ---
+// Jamais de plafond "trop cher" au feeling : cher + fort = autorisé (20%).
+export const MAJOR_SYMBOLS = ['BTC', 'ETH'];
+// RSI accepté jusqu'ici pour les majors en tendance bullish (exemption à la règle RSI>75)
+export const MAJORS_RSI_MAX = 80;
+// En mode dip (crash objectif), plafond relevé pour acheter la peur
+export const DIP_MAX_POSITION_PCT = 50;
+// Déclencheurs objectifs du mode dip (OU logique)
+export const DIP_DRAWDOWN_PCT = -15; // drawdown BTC 30j <= -15%
+export const DIP_FEAR_GREED_MAX = 25; // Fear & Greed <= 25 (peur extrême)
+// Cash sanctuarisé : jamais moins de 20% de cash, même en mode dip
+export const MIN_CASH_RESERVE_PCT = 20;
 
 // Stop dynamique partagé IA <-> exécution : 1.5× la volatilité journalière,
 // ancré à la config utilisateur (jamais < moitié ni > double du stop configuré).
