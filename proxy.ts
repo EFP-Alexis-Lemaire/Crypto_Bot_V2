@@ -10,6 +10,8 @@ import { timingSafeEqual } from 'node:crypto';
  * - /api/cron/* sont EXCLUS : ils utilisent leur propre contrôle
  *   (Bearer CRON_SECRET, voir lib/cron-auth.ts) pour cron-job.org et les
  *   crons natifs Vercel.
+ * - /api/widget est EXCLU : protégé par son propre ?token= (WIDGET_TOKEN),
+ *   pour que Scriptable y accède sans Basic Auth.
  * - /robots.txt reste public pour que les crawlers lisent "Disallow: /".
  *
  * Si les identifiants ne sont pas configurés : fail-closed en prod (500),
@@ -39,6 +41,12 @@ export function proxy(request: NextRequest) {
   // Crons : contrôle Bearer dédié dans chaque route, pas de Basic Auth ici
   // (sinon cron-job.org et Vercel Cron seraient bloqués).
   if (pathname.startsWith('/api/cron/')) {
+    return NextResponse.next();
+  }
+
+  // Widget iPhone : token dédié dans la route, pas de Basic Auth ici
+  // (sinon Scriptable serait bloqué par le popup).
+  if (pathname === '/api/widget') {
     return NextResponse.next();
   }
 
