@@ -17,6 +17,10 @@ export async function GET(request: Request) {
   }
 
   try {
+    const url = new URL(request.url);
+    // ?top=N : ajoute les N meilleures positions (triées par P&L %, max 5)
+    const topN = Math.min(Math.max(parseInt(url.searchParams.get('top') ?? '0') || 0, 0), 5);
+
     const db = sqlForContext('prod');
     const modeRows = (await db`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
     const env = modeRows[0]?.value === 'live' ? 'live' : 'paper';
@@ -24,11 +28,25 @@ export async function GET(request: Request) {
     const marketData = await getMarketData(WATCHLIST_COINS);
     const portfolio = await getPortfolioSummary(marketData, env, 'prod');
 
+    const topPerformers = topN > 0
+      ? portfolio.holdings
+          .filter(h => h.current_value_eur >= 1)
+          .map(h => ({
+            symbol: h.symbol,
+            value_eur: Number(h.current_value_eur.toFixed(2)),
+            pnl_eur: Number(h.pnl_eur.toFixed(2)),
+            pnl_percent: Number(h.pnl_percent.toFixed(2)),
+          }))
+          .sort((a, b) => b.pnl_percent - a.pnl_percent)
+          .slice(0, topN)
+      : undefined;
+
     return NextResponse.json({
       total_value_eur: Number(portfolio.total_value_eur.toFixed(2)),
       pnl_eur: Number(portfolio.pnl_eur.toFixed(2)),
       pnl_percent: Number(portfolio.pnl_percent.toFixed(2)),
       env,
+      ...(topPerformers ? { top_performers: topPerformers } : {}),
       updated_at: new Date().toISOString(),
     });
   } catch (error) {
