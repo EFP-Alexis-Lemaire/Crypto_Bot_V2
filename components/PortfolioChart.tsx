@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import {
   AreaChart,
   Area,
@@ -123,7 +124,16 @@ const CustomTooltip = ({ active, payload, label, initialValue }: {
   return null;
 };
 
+const RANGES = [
+  { key: '1d', label: 'Jour', ms: 24 * 3600 * 1000 },
+  { key: '7d', label: 'Sem.', ms: 7 * 24 * 3600 * 1000 },
+  { key: '30d', label: 'Mois', ms: 30 * 24 * 3600 * 1000 },
+  { key: '1y', label: 'Année', ms: 365 * 24 * 3600 * 1000 },
+  { key: 'all', label: 'Tout', ms: Infinity },
+] as const;
+
 export default function PortfolioChart({ snapshots, initialValue = 5000, currentValue: liveValue, currentCash, currentCrypto, trades = [], benchmark = null }: Props) {
+  const [rangeKey, setRangeKey] = useState<string>('all');
   // Filter outliers: remove snapshots where value is less than 20% of initial
   // These are likely data errors or mid-transaction snapshots
   const minValid = initialValue * 0.20;
@@ -180,61 +190,60 @@ export default function PortfolioChart({ snapshots, initialValue = 5000, current
     for (const d of data) d.btc = nearestBench(bench, d.ts);
   }
 
-  const values = data.map(d => d.value);
+  // --- Fenêtre temporelle (zoom Jour/Sem/Mois/Année/Tout) ---
+  const rangeMs = RANGES.find(r => r.key === rangeKey)?.ms ?? Infinity;
+  const isAll = rangeKey === 'all';
+  const start = isAll ? -Infinity : now - (rangeMs as number);
+  // Point de référence : dernier point réel au début de période (pour un P&L exact)
+  const boundary = !isAll ? [...data].reverse().find(d => d.ts <= start) : undefined;
+  let view = isAll ? data : data.filter(d => d.ts >= start);
+  if (!isAll && boundary && !view.includes(boundary)) {
+    view = [boundary, ...view];
+  }
+  if (view.length === 0) view = data.slice(-1);
+
+  const values = view.map(d => d.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
   const currentValue = values[values.length - 1];
-  const isPositive = currentValue >= initialValue;
+  // Référence de rentabilité : début de période (ou mise initiale en mode Tout)
+  const refValue = isAll ? initialValue : (boundary?.value ?? values[0] ?? initialValue);
+  const pnl = currentValue - refValue;
+  const pnlPct = refValue > 0 ? (pnl / refValue) * 100 : 0;
+  const isPositive = pnl >= 0;
+  const rangeLabel = RANGES.find(r => r.key === rangeKey)?.label ?? '';
 
-  // Smart Y-axis: zoom serré au lancement (plage des vraies valeurs), ancré sur
-  // la mise initiale pour garder la ligne de référence visible, puis s'élargit
-  // naturellement avec l'historique (dézoom progressif en fonction des données)
-  const lo = Math.min(minValue, initialValue);
-  const hi = Math.max(maxValue, initialValue);
+  // BTC sur la même période (comparaison "toi vs hold BTC")
+  let btcRangePct: number | null = null;
+  if (showBench) {
+    const benchStart = isAll ? bench[0].t : start;
+    const refB = valueAtOrBefore(bench.map(b => ({ ts: b.t, value: b.v })), benchStart);
+    const lastB = bench[bench.length - 1].v;
+    if (refB !== null && refB > 0) btcRangePct = ((lastB - refB) / refB) * 100;
+  }
+
+  // Smart Y-axis sur la fenêtre : ancré à la mise initiale seulement en mode Tout
+  const lo = isAll ? Math.min(minValue, initialValue) : minValue;
+  const hi = isAll ? Math.max(maxValue, initialValue) : maxValue;
   const range = hi - lo;
-  const padding = Math.max(range * 0.15, initialValue * 0.005);
+  const padding = Math.max(range * 0.15, (isAll ? initialValue : currentValue) * 0.005);
   const yMin = Math.max(0, lo - padding);
   const yMax = hi + padding;
 
-  const btcVals = showBench ? data.map(d => d.btc ?? 100) : [];
+  const btcVals = showBench ? view.map(d => d.btc ?? 100) : [];
   const yBtcMin = showBench ? Math.min(...btcVals) : 0;
   const yBtcMax = showBench ? Math.max(...btcVals) : 100;
   const btcPad = Math.max((yBtcMax - yBtcMin) * 0.15, 1);
-
-  const pnl = currentValue - initialValue;
-  const pnlPct = (pnl / initialValue) * 100;
-
-  // P&L par période (7j / 30j) depuis l'historique
-  const perfFor = (days: number): { eur: number; pct: number } | null => {
-    if (data.length < 2) return null;
-    const ref = valueAtOrBefore(data, now - days * 24 * 3600 * 1000);
-    if (ref === null || ref <= 0) return null;
-    // Historique trop court pour la période ? (premier point après le début de période)
-    if (data[0].ts > now - days * 24 * 3600 * 1000) return null;
-    const eur = currentValue - ref;
-    return { eur, pct: (eur / ref) * 100 };
-  };
-  const perf7 = perfFor(7);
-  const perf30 = perfFor(30);
-
-  // Benchmark BTC sur les mêmes périodes
-  const benchPerf = (days: number): number | null => {
-    if (!showBench) return null;
-    const ref = valueAtOrBefore(bench.map(b => ({ ts: b.t, value: b.v })), now - days * 24 * 3600 * 1000);
-    const last = bench[bench.length - 1].v;
-    if (ref === null || ref <= 0 || bench[0].t > now - days * 24 * 3600 * 1000) return null;
-    return ((last - ref) / ref) * 100;
-  };
-  const btc7 = benchPerf(7);
-  const btc30 = benchPerf(30);
 
   const strokeColor = isPositive ? '#10b981' : '#ef4444';
   const gradientId = isPositive ? 'gradientGreen' : 'gradientRed';
 
   // Reduce label density for readability
-  const tickInterval = data.length <= 10 ? 0 : data.length <= 30 ? 4 : Math.floor(data.length / 8);
+  const tickInterval = view.length <= 10 ? 0 : view.length <= 30 ? 4 : Math.floor(view.length / 8);
 
-  // Marqueurs buy/sell : rattachés au point le plus proche dans le temps (25 derniers)
+  // Marqueurs buy/sell : rattachés au point le plus proche dans le temps (25 derniers),
+  // limités à la fenêtre visible
+  const viewLabels = new Set(view.map(d => d.date));
   const markers = trades.slice(-25).map(t => {
     const ts = new Date(t.executed_at).getTime();
     if (!Number.isFinite(ts)) return null;
@@ -244,13 +253,14 @@ export default function PortfolioChart({ snapshots, initialValue = 5000, current
       const dist = Math.abs(d.ts - ts);
       if (dist < bestDist) { best = d; bestDist = dist; }
     }
+    if (!viewLabels.has(best.date)) return null;
     const isBuy = t.action === 'BUY';
     return { x: best.date, y: best.value, isBuy, symbol: t.symbol };
   }).filter((m): m is { x: string; y: number; isBuy: boolean; symbol: string } => m !== null);
 
   return (
     <div className="space-y-3">
-      {/* Mini stats bar */}
+      {/* Mini stats bar — chiffres adaptés à la période sélectionnée */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold ${
@@ -263,22 +273,11 @@ export default function PortfolioChart({ snapshots, initialValue = 5000, current
             {isPositive ? '+' : ''}{pnl.toFixed(2)}€
           </div>
           <span className={`text-sm font-semibold ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-            ({isPositive ? '+' : ''}{pnlPct.toFixed(2)}%)
+            ({isPositive ? '+' : ''}{pnlPct.toFixed(2)}%{isAll ? '' : ` · ${rangeLabel}`})
           </span>
-          {perf7 && (
+          {btcRangePct !== null && (
             <span className="text-xs text-gray-400 bg-gray-800/60 rounded-lg px-2 py-1">
-              7j: <span className={perf7.eur >= 0 ? 'text-green-400' : 'text-red-400'}>
-                {perf7.eur >= 0 ? '+' : ''}{perf7.pct.toFixed(1)}%
-              </span>
-              {btc7 !== null && <span className="text-gray-500"> · BTC {btc7 >= 0 ? '+' : ''}{btc7.toFixed(1)}%</span>}
-            </span>
-          )}
-          {perf30 && (
-            <span className="text-xs text-gray-400 bg-gray-800/60 rounded-lg px-2 py-1">
-              30j: <span className={perf30.eur >= 0 ? 'text-green-400' : 'text-red-400'}>
-                {perf30.eur >= 0 ? '+' : ''}{perf30.pct.toFixed(1)}%
-              </span>
-              {btc30 !== null && <span className="text-gray-500"> · BTC {btc30 >= 0 ? '+' : ''}{btc30.toFixed(1)}%</span>}
+              BTC {btcRangePct >= 0 ? '+' : ''}{btcRangePct.toFixed(1)}%{isAll ? '' : ` · ${rangeLabel}`}
             </span>
           )}
         </div>
@@ -286,6 +285,23 @@ export default function PortfolioChart({ snapshots, initialValue = 5000, current
           <div className="text-white font-bold text-lg">{currentValue.toFixed(2)}€</div>
           <div className="text-gray-500 text-xs">Valeur actuelle</div>
         </div>
+      </div>
+
+      {/* Sélecteur de période (zoom) */}
+      <div className="flex items-center gap-1.5">
+        {RANGES.map(r => (
+          <button
+            key={r.key}
+            onClick={() => setRangeKey(r.key)}
+            className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+              rangeKey === r.key
+                ? 'bg-blue-500/20 text-blue-300'
+                : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
+            }`}
+          >
+            {r.label}
+          </button>
+        ))}
       </div>
 
       {/* Légende */}
@@ -310,7 +326,7 @@ export default function PortfolioChart({ snapshots, initialValue = 5000, current
       {/* Chart */}
       <div className="w-full h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 10, right: 5, left: 5, bottom: 5 }}>
+          <AreaChart data={view} margin={{ top: 10, right: 5, left: 5, bottom: 5 }}>
             <defs>
               <linearGradient id="gradientGreen" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#10b981" stopOpacity={0.25} />
@@ -357,22 +373,24 @@ export default function PortfolioChart({ snapshots, initialValue = 5000, current
               }
             />
 
-            {/* Initial investment reference line */}
-            <ReferenceLine
-              yAxisId="left"
-              y={initialValue}
-              stroke="#374151"
-              strokeDasharray="6 3"
-              label={{
-                value: `Initial: ${initialValue}€`,
-                fill: '#4b5563',
-                fontSize: 10,
-                position: 'insideTopRight',
-              }}
-            />
+            {/* Initial investment reference line (mode Tout uniquement) */}
+            {isAll && (
+              <ReferenceLine
+                yAxisId="left"
+                y={initialValue}
+                stroke="#374151"
+                strokeDasharray="6 3"
+                label={{
+                  value: `Initial: ${initialValue}€`,
+                  fill: '#4b5563',
+                  fontSize: 10,
+                  position: 'insideTopRight',
+                }}
+              />
+            )}
 
             {/* Current value reference line */}
-            {Math.abs(currentValue - initialValue) > initialValue * 0.005 && (
+            {refValue > 0 && Math.abs(currentValue - refValue) > refValue * 0.005 && (
               <ReferenceLine
                 yAxisId="left"
                 y={currentValue}
