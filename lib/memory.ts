@@ -1,4 +1,5 @@
 import { sqlForContext, DbContext } from './db';
+import { computeFifo } from './fifo';
 
 /**
  * Bot Memory — gives the AI context about its own past decisions and performance.
@@ -225,6 +226,120 @@ export async function getBotMemory(ctx: DbContext = 'uat'): Promise<BotMemory> {
       avg_trade_size_eur: 0,
       lessons: [],
     };
+  }
+}
+
+// --- Revue des pertes (journal de trading) ---
+// Quand le portefeuille perd plus de `thresholdPct` sur 3 jours, on remonte à
+// l'IA ce qui a coûté cher (dossiers, sur-trading, concentration) + des règles
+// anti-récidive. Sinon null (pas de bruit quand tout va bien).
+export interface DrawdownReview {
+  dd_eur: number;
+  dd_pct: number;
+  start_total: number;
+  end_total: number;
+  trades_count: number;
+  buys_count: number;
+  sells_count: number;
+  realized_total_eur: number;
+  worst: Array<{ symbol: string; realized_eur: number; trades: number }>;
+  lessons: string[];
+}
+
+export async function getDrawdownReview(
+  ctx: DbContext = 'uat',
+  env = 'live',
+  thresholdPct = -2,
+): Promise<DrawdownReview | null> {
+  const db = sqlForContext(ctx);
+  try {
+    const snaps = (await db`
+      SELECT total_value_eur, snapshotted_at FROM portfolio_snapshots
+      WHERE env = ${env} AND snapshotted_at > NOW() - INTERVAL '4 days'
+      ORDER BY snapshotted_at ASC
+    `) as Array<Record<string, unknown>>;
+    if (snaps.length < 2) return null;
+    const start = parseFloat(String(snaps[0].total_value_eur));
+    const end = parseFloat(String(snaps[snaps.length - 1].total_value_eur));
+    if (!(start > 0)) return null;
+    const ddEur = end - start;
+    const ddPct = (ddEur / start) * 100;
+    if (ddPct > thresholdPct) return null; // pas de pertes significatives
+
+    const trades = (await db`
+      SELECT symbol, action, amount, total_eur, fee_eur FROM trades
+      WHERE env = ${env} AND action IN ('BUY', 'SELL')
+      AND executed_at > NOW() - INTERVAL '3 days'
+      ORDER BY executed_at ASC
+    `) as Array<Record<string, unknown>>;
+    const { perSymbol } = computeFifo(
+      trades.map(t => ({
+        symbol: String(t.symbol),
+        action: String(t.action),
+        amount: parseFloat(String(t.amount ?? 0)) || 0,
+        total_eur: parseFloat(String(t.total_eur ?? 0)) || 0,
+        fee_eur: parseFloat(String(t.fee_eur ?? 0)) || 0,
+      }))
+    );
+
+    let buys = 0;
+    let sells = 0;
+    let realizedTotal = 0;
+    let buyVolume = 0;
+    const worst: DrawdownReview['worst'] = [];
+    for (const [symbol, st] of Object.entries(perSymbol)) {
+      buys += st.buys;
+      sells += st.sells;
+      buyVolume += st.volume_eur;
+      realizedTotal += st.realized_eur;
+      if (st.realized_eur < -1) {
+        worst.push({ symbol, realized_eur: st.realized_eur, trades: st.buys + st.sells });
+      }
+    }
+    worst.sort((a, b) => a.realized_eur - b.realized_eur);
+
+    const lessons: string[] = [];
+    for (const w of worst.slice(0, 3)) {
+      lessons.push(
+        `${w.symbol} a coûté ${w.realized_eur.toFixed(2)}€ en ${w.trades} trade(s) sur 3j — avant d'y revenir : breakout volume (VolZ ≥ 2) ou squeeze + confiance ≥ 80, sinon SKIP.`
+      );
+    }
+    if (buys >= 6) {
+      lessons.push(
+        `${buys} achats en 3 jours de pertes : sur-trading — réduis les montants de 25% et exige une confirmation volume sur chaque entrée.`
+      );
+    }
+    if (sells >= buys + 2 && realizedTotal < 0) {
+      lessons.push(
+        `Ventes en cascade dans la baisse (${sells} ventes) : ne solde pas sur peur — laisse le stop-loss et le trailing travailler.`
+      );
+    }
+    const topVol = Object.entries(perSymbol).sort((a, b) => b[1].volume_eur - a[1].volume_eur)[0];
+    if (topVol && buyVolume > 0 && topVol[1].volume_eur / buyVolume > 0.5) {
+      lessons.push(
+        `Concentration excessive sur ${topVol[0]} (${((topVol[1].volume_eur / buyVolume) * 100).toFixed(0)}% des achats 3j) — diversifie, max 2 paris corrélés.`
+      );
+    }
+    if (lessons.length === 0) {
+      lessons.push(
+        `Baisse subie (${ddEur.toFixed(2)}€) sans erreur de trading identifiée : marché adverse — reste sélectif, pas de rattrapage forcé.`
+      );
+    }
+
+    return {
+      dd_eur: Number(ddEur.toFixed(2)),
+      dd_pct: Number(ddPct.toFixed(2)),
+      start_total: Number(start.toFixed(2)),
+      end_total: Number(end.toFixed(2)),
+      trades_count: buys + sells,
+      buys_count: buys,
+      sells_count: sells,
+      realized_total_eur: Number(realizedTotal.toFixed(2)),
+      worst: worst.slice(0, 3).map(w => ({ ...w, realized_eur: Number(w.realized_eur.toFixed(2)) })),
+      lessons,
+    };
+  } catch {
+    return null; // non-bloquant : jamais d'échec de cycle pour la revue
   }
 }
 

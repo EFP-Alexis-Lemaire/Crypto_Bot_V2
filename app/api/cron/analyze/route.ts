@@ -19,11 +19,13 @@ import {
   executePaperTrade,
   savePortfolioSnapshot,
   checkStopLossAndTakeProfit,
+  applyTradeToMemSummary,
 } from '@/lib/portfolio';
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/lib/exchanges/coinbase';
+import { getDrawdownReview } from '@/lib/memory';
 import { sendTradeAlert } from '@/lib/telegram';
-import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX } from '@/lib/types';
+import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX, RISK_CONFIGS, MAJOR_SYMBOLS, DIP_MAX_POSITION_PCT } from '@/lib/types';
 import { cronUnauthorized } from '@/lib/cron-auth';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -281,6 +283,12 @@ export async function GET(request: Request) {
       } catch { /* fail-open : on tente quand même */ }
     }
 
+    // Revue des pertes 3j (null si pas de pertes) : journal anti-récidive pour l'IA
+    const drawdownReview = await getDrawdownReview(dbContext, currentEnv);
+    if (drawdownReview) {
+      console.log(`[Bot Cycle ${cycleId}] Drawdown 3j: ${drawdownReview.dd_pct}% (${drawdownReview.dd_eur}€) — revue injectée`);
+    }
+
     // AI Analysis — en live on transmet le cash PAR exchange pour que l'IA
     // dimensionne chaque ordre au cash d'un seul exchange (pas au total consolidé)
     console.log(`[Bot Cycle ${cycleId}] Running AI analysis...`);
@@ -310,6 +318,7 @@ export async function GET(request: Request) {
       eurUsdRate,
       dbContext,
       marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance, dip_mode: dipMode, btc_drawdown_30d: btcDrawdown },
+      drawdownReview,
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle
@@ -334,6 +343,8 @@ export async function GET(request: Request) {
     const executedTrades: { decision: BotDecision; result: { success: boolean; message: string } }[] = [];
     // Compteur sectoriel anti-corrélation (max 2 BUYs/secteur/cycle)
     const sectorBuys: Record<string, number> = {};
+    // Dépensé par symbole ce cycle (cap cumulé max_position sur les renforts)
+    const symbolSpent: Record<string, number> = {};
 
     for (const decision of decisions) {
       // Block immediate rebuy of recently sold symbols
@@ -424,26 +435,48 @@ export async function GET(request: Request) {
         if (decision.amount_eur > maxAllowed) {
           decision.amount_eur = maxAllowed;
         }
+        // Cap cumulé par symbole : les achats successifs du même cycle ne dépassent
+        // pas ensemble max_position. En mode dip, les majors montent jusqu'à 50%.
+        const maxPosPct = dipMode && MAJOR_SYMBOLS.includes(decision.symbol)
+          ? DIP_MAX_POSITION_PCT
+          : RISK_CONFIGS[riskLevel].max_position_size_pct;
+        const maxPosEur = portfolio.total_value_eur * maxPosPct / 100;
+        const heldVal = portfolio.holdings.find(h => h.symbol === decision.symbol)?.current_value_eur ?? 0;
+        const room = maxPosEur - heldVal - (symbolSpent[decision.symbol] ?? 0);
+        if (room < 5) {
+          await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+            VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+              ${`Position ${decision.symbol} déjà à ${(heldVal + (symbolSpent[decision.symbol] ?? 0)).toFixed(0)}€ (max ${maxPosEur.toFixed(0)}€). Renfort refusé.`},
+              0, 0, 'max-position', ${currentEnv})`;
+          continue;
+        }
+        if (decision.amount_eur > room) {
+          decision.amount_eur = parseFloat(room.toFixed(2));
+        }
       }
 
       const result = isLive
         ? await executeLiveTrade(decision, marketCoin, eurUsdRate)
         : await executePaperTrade(decision, marketCoin, eurUsdRate, currentEnv, dbContext);
       executedTrades.push({ decision, result });
+      // Montant réellement débité (le routeur peut ajuster de quelques centimes)
+      const charged = (result as { chargedEur?: number }).chargedEur ?? decision.amount_eur;
       if (result.success && decision.action === 'BUY') {
         const sector = sectorOf(decision.symbol);
         sectorBuys[sector] = (sectorBuys[sector] ?? 0) + 1;
+        symbolSpent[decision.symbol] = (symbolSpent[decision.symbol] ?? 0) + charged;
       }
 
       // Màj mémoire du cash par exchange après chaque trade réussi
       // (pour que les BUYs suivants du même cycle voient le cash restant)
       if (result.success && isLive) {
         const usedExchange = (result as { exchange?: 'kraken' | 'coinbase' }).exchange
-          ?? (decision.amount_eur <= krakenCashMem * 0.95 ? 'kraken' : 'coinbase');
+          ?? (charged <= krakenCashMem * 0.95 ? 'kraken' : 'coinbase');
         if (decision.action === 'BUY') {
-          if (usedExchange === 'kraken') krakenCashMem = Math.max(0, krakenCashMem - decision.amount_eur);
-          else coinbaseCashMem = Math.max(0, coinbaseCashMem - decision.amount_eur);
-          portfolio.cash_eur = Math.max(0, portfolio.cash_eur - decision.amount_eur);
+          if (usedExchange === 'kraken') krakenCashMem = Math.max(0, krakenCashMem - charged);
+          else coinbaseCashMem = Math.max(0, coinbaseCashMem - charged);
+          portfolio.cash_eur = Math.max(0, portfolio.cash_eur - charged);
+          applyTradeToMemSummary(portfolio, 'BUY', decision.symbol, charged, marketCoin.price_eur, marketCoin.name);
         } else if (decision.action === 'SELL') {
           // Vente splittée : on crédite chaque exchange au net réellement reçu
           const split = (result as { split?: { kraken: number; coinbase: number } }).split;
@@ -458,6 +491,7 @@ export async function GET(request: Request) {
             else coinbaseCashMem += credited;
             portfolio.cash_eur += credited;
           }
+          applyTradeToMemSummary(portfolio, 'SELL', decision.symbol, decision.amount_eur, marketCoin.price_eur);
         }
       }
 

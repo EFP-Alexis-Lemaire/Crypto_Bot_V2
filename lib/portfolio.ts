@@ -316,6 +316,67 @@ export async function executePaperTrade(
   }
 }
 
+// Mise à jour optimiste du résumé mémoire après un trade réussi du cycle courant.
+// Évite d'afficher des P&L périmés dans les alertes suivantes du même cycle
+// (ex: 2e achat AVAX qui affiche encore +0.00€). Approximatif (frais moyens),
+// la DB resynchronisée au cycle suivant fait foi.
+export function applyTradeToMemSummary(
+  portfolio: PortfolioSummary,
+  action: 'BUY' | 'SELL',
+  symbol: string,
+  amountEur: number,
+  priceEur: number,
+  name?: string,
+): void {
+  const FEE = 0.0026;
+  if (action === 'BUY') {
+    const crypto = (amountEur * (1 - FEE)) / Math.max(priceEur, 1e-12);
+    const found = portfolio.holdings.find(h => h.symbol === symbol);
+    const prevAmt = found?.amount ?? 0;
+    const prevAvg = found && found.avg_buy_price_eur > 0 ? found.avg_buy_price_eur : priceEur;
+    const newAmt = prevAmt + crypto;
+    const newAvg = newAmt > 0 ? (prevAmt * prevAvg + amountEur) / newAmt : priceEur;
+    if (found) {
+      found.amount = newAmt;
+      found.avg_buy_price_eur = newAvg;
+      found.current_price_eur = priceEur;
+      found.current_value_eur = newAmt * priceEur;
+    } else {
+      portfolio.holdings.push({
+        symbol,
+        name: name ?? symbol,
+        amount: newAmt,
+        avg_buy_price_eur: newAvg,
+        current_price_eur: priceEur,
+        current_value_eur: newAmt * priceEur,
+        pnl_eur: 0,
+        pnl_percent: 0,
+      });
+    }
+    const h = portfolio.holdings.find(x => x.symbol === symbol);
+    if (h) {
+      h.pnl_eur = h.current_value_eur - h.amount * h.avg_buy_price_eur;
+      const cost = h.amount * h.avg_buy_price_eur;
+      h.pnl_percent = cost > 0 ? (h.pnl_eur / cost) * 100 : 0;
+    }
+  } else {
+    const found = portfolio.holdings.find(h => h.symbol === symbol);
+    if (!found || found.current_value_eur <= 0) return;
+    const frac = Math.min(1, amountEur / found.current_value_eur);
+    found.amount *= 1 - frac;
+    found.current_value_eur *= 1 - frac;
+    found.current_price_eur = priceEur;
+    found.pnl_eur = found.current_value_eur - found.amount * found.avg_buy_price_eur;
+    const cost = found.amount * found.avg_buy_price_eur;
+    found.pnl_percent = cost > 0 ? (found.pnl_eur / cost) * 100 : 0;
+    if (found.amount <= 0.000001) {
+      portfolio.holdings = portfolio.holdings.filter(h => h !== found);
+    }
+  }
+  portfolio.crypto_value_eur = portfolio.holdings.reduce((s, h) => s + h.current_value_eur, 0);
+  portfolio.total_value_eur = portfolio.cash_eur + portfolio.crypto_value_eur;
+}
+
 export async function savePortfolioSnapshot(
   portfolio: PortfolioSummary,
   envOverride?: TradingEnv,

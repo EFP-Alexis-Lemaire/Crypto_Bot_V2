@@ -57,15 +57,21 @@ export async function getExchangeCash(): Promise<{ kraken: number; coinbase: num
   return { kraken, coinbase, total: kraken + coinbase };
 }
 
+// Tolérance poussière : en dessous, on ajuste au solde plutôt que de basculer
+// d'exchange (une bascule pour 0.11€ coûterait plus cher en frais que l'écart)
+const ROUTING_DUST_EUR = 2;
+
 // Routage intelligent des achats :
 // - préfère Kraken (frais 0.26% vs 0.6% Coinbase) SI Kraken peut couvrir le montant plein
 //   en gardant 5% de réserve (amount <= cash * 0.95)
+// - si l'écart n'est que poussière (< 2€ sous le solde brut), on ajuste le montant
+//   au solde et on reste (frais faibles) au lieu de basculer pour des centimes
 // - sinon bascule sur Coinbase si lui peut couvrir
 // - sinon null (aucun exchange ne peut payer le montant plein -> SKIP, pas d'exécution partielle qui vide un exchange)
 export async function chooseExchangeForBuy(
   symbol: string,
   amountEur: number
-): Promise<{ exchange: 'kraken' | 'coinbase' | null; krakenCash: number; coinbaseCash: number; reason: string }> {
+): Promise<{ exchange: 'kraken' | 'coinbase' | null; krakenCash: number; coinbaseCash: number; reason: string; cappedAmount?: number }> {
   // Kraken : mapping statique + découverte dynamique des paires EUR
   // (endpoint public). Coinbase : mapping + vérification produit ci-dessous.
   const krakenPair = await resolveKrakenPair(symbol);
@@ -88,11 +94,26 @@ export async function chooseExchangeForBuy(
   if (krakenFits) {
     return { exchange: 'kraken', krakenCash: kraken, coinbaseCash: coinbase, reason: `Kraken peut couvrir ${amountEur.toFixed(2)}€ (solde ${kraken.toFixed(2)}€)` };
   }
+  // Écart poussière sur Kraken (ex: 205.27€ demandés, 205.16€ dispo) : on ajuste
+  // au solde brut et on reste sur Kraken plutôt que payer plus cher sur Coinbase
+  if (onKraken && kraken >= 5 && amountEur > kraken * 0.95 && amountEur - kraken <= ROUTING_DUST_EUR) {
+    const capped = Math.floor(kraken * 100) / 100;
+    if (capped >= 5) {
+      return { exchange: 'kraken', krakenCash: kraken, coinbaseCash: coinbase, cappedAmount: capped, reason: `Montant ajusté à ${capped.toFixed(2)}€ pour tenir sur Kraken (solde ${kraken.toFixed(2)}€, frais réduits)` };
+    }
+  }
   if (coinbaseFits) {
     const why = onKraken
       ? `Kraken insuffisant (${kraken.toFixed(2)}€) pour ${amountEur.toFixed(2)}€ -> bascule Coinbase`
       : `Symbol non listé sur Kraken -> Coinbase`;
     return { exchange: 'coinbase', krakenCash: kraken, coinbaseCash: coinbase, reason: `${why} (solde ${coinbase.toFixed(2)}€)` };
+  }
+  // Même tolérance côté Coinbase avant de déclarer forfait
+  if (onCoinbase && coinbaseProductOk && coinbase >= 5 && amountEur > coinbase * 0.95 && amountEur - coinbase <= ROUTING_DUST_EUR) {
+    const capped = Math.floor(coinbase * 100) / 100;
+    if (capped >= 5) {
+      return { exchange: 'coinbase', krakenCash: kraken, coinbaseCash: coinbase, cappedAmount: capped, reason: `Montant ajusté à ${capped.toFixed(2)}€ pour tenir sur Coinbase (solde ${coinbase.toFixed(2)}€)` };
+    }
   }
   const blocks: string[] = [];
   if (onKraken) blocks.push(`Kraken: ${kraken.toFixed(2)}€ (insuffisant)`);
@@ -134,6 +155,9 @@ export interface LiveTradeResult {
   exchange?: 'kraken' | 'coinbase';
   // Net EUR crédité par exchange (ventes splittées sur les deux)
   split?: { kraken: number; coinbase: number };
+  // Montant EUR réellement débité pour un BUY (diffère de decision.amount_eur
+  // si le routeur a ajusté au solde à quelques centimes près)
+  chargedEur?: number;
 }
 
 export async function executeLiveTrade(
@@ -155,7 +179,7 @@ export async function executeLiveTrade(
       const exchange = routing.exchange;
 
       const PLATFORM_FEE_RATE = exchange === 'kraken' ? PLATFORM_FEE_RATE_KRAKEN : PLATFORM_FEE_RATE_COINBASE;
-      const actualAmount = decision.amount_eur;
+      const actualAmount = routing.cappedAmount ?? decision.amount_eur;
       const fee = actualAmount * PLATFORM_FEE_RATE;
       let txid: string | undefined;
 
@@ -202,7 +226,7 @@ export async function executeLiveTrade(
           }
         }
       }
-      return { success: true, message: `[LIVE] Acheté ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€ sur ${exchange} (${routing.reason})`, txid, exchange };
+      return { success: true, message: `[LIVE] Acheté ${cryptoAmount.toFixed(6)} ${decision.symbol} à ${currentPrice.price_eur.toFixed(4)}€ sur ${exchange} (${routing.reason})`, txid, exchange, chargedEur: actualAmount };
     }
 
     if (decision.action === 'SELL') {

@@ -14,7 +14,7 @@ import {
 } from './types';
 import { logAICost } from './ai-costs';
 import { getDefiTVL } from './market-data';
-import { getBotMemory, formatMemoryForPrompt } from './memory';
+import { getBotMemory, formatMemoryForPrompt, DrawdownReview } from './memory';
 import { DbContext } from './db';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -54,6 +54,8 @@ interface AnalysisContext {
     dip_mode?: boolean;           // crash objectif : plafond majors relevé
     btc_drawdown_30d?: number | null; // drawdown BTC vs plus haut 30j (%)
   };
+  // Revue des pertes 3j (null si pas de pertes significatives) : journal anti-récidive
+  drawdownReview?: DrawdownReview | null;
 }
 
 export async function analyzeMarketWithAI(
@@ -195,6 +197,14 @@ export async function analyzeMarketWithAI(
           const marketPrice = context.marketData.find(m => m.symbol === d.symbol)?.price_eur;
           if (marketPrice && marketPrice > 0) {
             d.stop_loss_eur = parseFloat((marketPrice * (1 - stopPct / 100)).toFixed(6));
+            // Garde-fou affichage : un take-profit délirant (ex: +149%) est une
+            // hallucination — on le ramène dans [frais couverts, 2× l'objectif config].
+            // L'exécution, elle, suit les % globaux (paliers 50% / 100%).
+            const tpMin = marketPrice * 1.02;
+            const tpMax = marketPrice * (1 + (riskConfig.take_profit_pct * 2) / 100);
+            if (d.take_profit_eur === undefined || !(d.take_profit_eur > 0) || d.take_profit_eur < tpMin || d.take_profit_eur > tpMax) {
+              d.take_profit_eur = parseFloat((marketPrice * (1 + riskConfig.take_profit_pct / 100)).toFixed(6));
+            }
           }
         }
         // If after capping the amount is below minimum, convert to SKIP
@@ -284,6 +294,14 @@ function buildDecisionPrompt(
 Prends des décisions de trading RÉFLÉCHIES pour le portefeuille suivant.
 
 ${memoryText}
+${context.drawdownReview ? `
+=== REVUE DES PERTES (3 DERNIERS JOURS) — NE RÉPÈTE PAS CES ERREURS ===
+Portefeuille : ${context.drawdownReview.start_total.toFixed(2)}€ → ${context.drawdownReview.end_total.toFixed(2)}€ (${context.drawdownReview.dd_pct.toFixed(2)}%, ${context.drawdownReview.dd_eur.toFixed(2)}€).
+Trades 3j : ${context.drawdownReview.trades_count} (${context.drawdownReview.buys_count} achats / ${context.drawdownReview.sells_count} ventes), réalisé : ${context.drawdownReview.realized_total_eur.toFixed(2)}€.
+${context.drawdownReview.worst.length > 0 ? `Pires dossiers : ${context.drawdownReview.worst.map(w => `${w.symbol} ${w.realized_eur.toFixed(2)}€ en ${w.trades} trades`).join(' | ')}.` : 'Aucun dossier perdant isolé.'}
+Leçons anti-récidive :
+${context.drawdownReview.lessons.map(l => `- ${l}`).join('\n')}
+RÈGLE : tout BUY sur un symbole cité ci-dessus exige confiance ≥ 80 + VolZ ≥ 2 ou squeeze, sinon SKIP. En sortie de pertes, réduis tes montants de 25% par défaut.` : ''}
 
 === CONTEXTE MARCHÉ ===
 Fear & Greed: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
