@@ -17,9 +17,19 @@ export interface SymbolPerformance {
   current_price_eur: number;
 }
 
+const PERIODS = [
+  { key: '1d', label: 'Jour' },
+  { key: '7d', label: 'Sem.' },
+  { key: '30d', label: 'Mois' },
+  { key: '1y', label: 'Année' },
+  { key: 'all', label: 'Tout' },
+];
+
 interface Props {
   rows: SymbolPerformance[];
   totals: { realized_eur: number; unrealized_eur: number; fees_eur: number } | null;
+  period?: string;
+  onPeriodChange?: (p: string) => void;
 }
 
 function eur(v: number, signed = true) {
@@ -27,20 +37,40 @@ function eur(v: number, signed = true) {
   return `${sign}${v.toFixed(2)}€`;
 }
 
-export default function PerformanceTable({ rows, totals }: Props) {
+export default function PerformanceTable({ rows, totals, period = 'all', onPeriodChange }: Props) {
   // Poussières (< 1€, sans trades ni P&L) masquées par défaut pour garder le focus
   const significant = rows.filter(r => Math.abs(r.total_eur) >= 0.01 || r.buys > 0 || r.sells > 0 || r.holding_value_eur >= 5);
   const dustCount = rows.length - significant.length;
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+      <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-3 border-b border-gray-800">
         <h3 className="text-white font-semibold flex items-center gap-2 text-sm">
           <Trophy className="w-4 h-4 text-yellow-400" />
           Performances par crypto
         </h3>
+        {onPeriodChange && (
+          <div className="flex items-center gap-1">
+            {PERIODS.map(p => (
+              <button
+                key={p.key}
+                onClick={() => onPeriodChange(p.key)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                  period === p.key
+                    ? 'bg-yellow-500/20 text-yellow-300'
+                    : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        )}
         {totals && (
           <div className="flex items-center gap-3 text-xs">
+            <span className="text-gray-600">
+              {period === 'all' ? 'Tout' : PERIODS.find(p => p.key === period)?.label} · réalisé/frais sur période, latent actuel
+            </span>
             <span className="text-gray-500">
               Réalisé : <span className={totals.realized_eur >= 0 ? 'text-green-400' : 'text-red-400'}>{eur(totals.realized_eur)}</span>
             </span>

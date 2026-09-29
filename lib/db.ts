@@ -171,7 +171,13 @@ export async function initializeDatabase() {
       ('take_profit_pct', '15'),
       ('initial_portfolio_eur', '5000'),
       ('is_active', 'true'),
-      ('telegram_muted', 'false')
+      ('telegram_muted', 'false'),
+      ('dca_enabled', 'false'),
+      ('dca_amount_eur', '50'),
+      ('dca_weekday', '1'),
+      ('dca_symbols', 'BTC,ETH'),
+      ('circuit_breaker_enabled', 'true'),
+      ('circuit_breaker_pct', '8')
     ON CONFLICT (key) DO NOTHING
   `;
 

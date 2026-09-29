@@ -20,10 +20,13 @@ import {
   savePortfolioSnapshot,
   checkStopLossAndTakeProfit,
   applyTradeToMemSummary,
+  getDrawdown24h,
 } from '@/lib/portfolio';
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
 import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/lib/exchanges/coinbase';
 import { getDrawdownReview } from '@/lib/memory';
+import { runScheduledDca } from '@/lib/dca';
+import { sendTelegramMessage } from '@/lib/telegram';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX, RISK_CONFIGS, MAJOR_SYMBOLS, DIP_MAX_POSITION_PCT } from '@/lib/types';
 import { cronUnauthorized } from '@/lib/cron-auth';
@@ -205,6 +208,33 @@ export async function GET(request: Request) {
     // relire trading_mode sur la mauvaise DB
     const portfolio = await getPortfolioSummary(allMarketData, currentEnv, dbContext);
 
+    // Coupe-circuit : chute >= seuil sur 24h → BUYs en pause ce cycle.
+    // Les ventes/stops continuent (protection), le DCA continue (mécanique).
+    let breakerTripped = false;
+    let breakerDd: number | null = null;
+    {
+      const bCfg = (await db`SELECT key, value FROM bot_config WHERE key IN ('circuit_breaker_enabled', 'circuit_breaker_pct', 'circuit_breaker_tripped')`) as Array<{ key: string; value: string }>;
+      const bmap: Record<string, string> = {};
+      bCfg.forEach(r => { bmap[r.key] = r.value; });
+      const breakerOn = (bmap.circuit_breaker_enabled ?? 'true') === 'true';
+      const breakerPct = Math.abs(parseFloat(bmap.circuit_breaker_pct ?? '8') || 8);
+      if (breakerOn) {
+        breakerDd = await getDrawdown24h(dbContext, currentEnv);
+        if (breakerDd !== null && breakerDd <= -breakerPct) {
+          breakerTripped = true;
+          const today = new Date().toISOString().slice(0, 10);
+          if (bmap.circuit_breaker_tripped !== today) {
+            await db`INSERT INTO bot_config (key, value, updated_at) VALUES ('circuit_breaker_tripped', ${today}, NOW()) ON CONFLICT (key) DO UPDATE SET value = ${today}, updated_at = NOW()`;
+            await sendTelegramMessage(`🛑 <b>Coupe-circuit déclenché</b> : ${breakerDd.toFixed(2)}% en 24h (seuil −${breakerPct}%). Achats en pause — stops et ventes maintenus.`, isLive, dbContext);
+          }
+          console.log(`[Bot Cycle ${cycleId}] CIRCUIT BREAKER actif (${breakerDd.toFixed(2)}% / 24h) — BUYs en pause`);
+        } else if (breakerDd !== null && bmap.circuit_breaker_tripped) {
+          await db`UPDATE bot_config SET value = '', updated_at = NOW() WHERE key = 'circuit_breaker_tripped'`;
+          await sendTelegramMessage(`✅ <b>Coupe-circuit levé</b> : drawdown résorbé (${breakerDd.toFixed(2)}% en 24h) — achats réactivés.`, isLive, dbContext);
+        }
+      }
+    }
+
     // Check stop-loss (dynamique : 1.5× vol) / take-profit par paliers (50% puis solde)
     console.log(`[Bot Cycle ${cycleId}] Checking stop-loss/take-profit...`);
     const stopLossActions = await checkStopLossAndTakeProfit(allMarketData, currentEnv, dbContext, volMap);
@@ -346,7 +376,39 @@ export async function GET(request: Request) {
     // Dépensé par symbole ce cycle (cap cumulé max_position sur les renforts)
     const symbolSpent: Record<string, number> = {};
 
+    // Achats programmés hebdo (enveloppe séparée du budget IA ; tourne même si
+    // coupe-circuit actif — acheter le creux, c'est le principe du DCA)
+    const dcaRuns = await runScheduledDca({
+      db, ctx: dbContext, env: currentEnv, isLive,
+      marketData: allMarketData, eurUsdRate, cycleId,
+    });
+    let dcaExecuted = 0;
+    if (isLive) {
+      for (const dca of dcaRuns) {
+        if (!dca.result.success) continue;
+        dcaExecuted++;
+        const charged = dca.result.chargedEur ?? dca.decision.amount_eur;
+        const usedEx = dca.result.exchange ?? (charged <= krakenCashMem * 0.95 ? 'kraken' : 'coinbase');
+        if (usedEx === 'kraken') krakenCashMem = Math.max(0, krakenCashMem - charged);
+        else coinbaseCashMem = Math.max(0, coinbaseCashMem - charged);
+        portfolio.cash_eur = Math.max(0, portfolio.cash_eur - charged);
+        symbolSpent[dca.decision.symbol] = (symbolSpent[dca.decision.symbol] ?? 0) + charged;
+        const sec = sectorOf(dca.decision.symbol);
+        sectorBuys[sec] = (sectorBuys[sec] ?? 0) + 1;
+        applyTradeToMemSummary(portfolio, 'BUY', dca.decision.symbol, charged, dca.marketCoin.price_eur, dca.marketCoin.name);
+      }
+    }
+
     for (const decision of decisions) {
+      // Coupe-circuit : achats en pause (ventes et stops maintenus)
+      if (breakerTripped && decision.action === 'BUY') {
+        console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — circuit breaker (${breakerDd?.toFixed(2)}% / 24h)`);
+        await db`INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+          VALUES (${cycleId}, ${decision.symbol}, 'SKIP',
+            ${`Coupe-circuit actif (${breakerDd?.toFixed(2)}% en 24h) : achat en pause, stops maintenus.`},
+            0, 0, 'circuit-breaker', ${currentEnv})`;
+        continue;
+      }
       // Block immediate rebuy of recently sold symbols
       if (decision.action === 'BUY' && recentlySold.has(decision.symbol)) {
         console.log(`[Bot Cycle ${cycleId}] Skipping BUY ${decision.symbol} — sold within last 2h`);
@@ -541,6 +603,8 @@ export async function GET(request: Request) {
       ctx: dbContext,
       env: currentEnv,
       trades_executed: executedTrades.length,
+      dca_executed: dcaExecuted,
+      circuit_breaker: { tripped: breakerTripped, dd_24h_pct: breakerDd },
       stop_loss_triggered: stopLossActions.length,
       portfolio_value_eur: updatedPortfolio.total_value_eur,
       decisions: decisions.map(d => ({

@@ -101,6 +101,7 @@ export default function Dashboard() {
   const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
   const [performance, setPerformance] = useState<SymbolPerformance[]>([]);
   const [perfTotals, setPerfTotals] = useState<{ realized_eur: number; unrealized_eur: number; fees_eur: number } | null>(null);
+  const [perfPeriod, setPerfPeriod] = useState('all');
   const [health, setHealth] = useState<React.ComponentProps<typeof HealthStrip>['health']>(null);
   const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
     // Default to PROD when running on production Vercel deployment
@@ -144,7 +145,7 @@ export default function Dashboard() {
           fetch('/api/cycles?limit=30', { headers: dbHeaders }),
           fetch('/api/morning-report', { headers: dbHeaders }),
           fetch('/api/ai-costs', { headers: dbHeaders }),
-          fetch('/api/performance', { headers: dbHeaders }),
+          fetch(`/api/performance?period=${perfPeriod}`, { headers: dbHeaders }),
           fetch('/api/health', { headers: dbHeaders }),
         ]);
 
@@ -208,7 +209,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [dbContext]);
+  }, [dbContext, perfPeriod]);
 
   useEffect(() => {
     isMounted.current = true;
@@ -465,7 +466,7 @@ export default function Dashboard() {
             </div>
 
             {/* Performances par crypto (meilleures → pires) */}
-            <PerformanceTable rows={performance} totals={perfTotals} />
+            <PerformanceTable rows={performance} totals={perfTotals} period={perfPeriod} onPeriodChange={setPerfPeriod} />
 
             {/* Holdings Table — poussières (< 1€) masquées, filtre exchange */}
             {portfolio && portfolio.holdings.length > 0 && (() => {

@@ -125,6 +125,22 @@ export async function GET(request: Request) {
       migrations.push('portfolio.highest_price_eur: colonne créée');
     } catch { migrations.push('portfolio.highest_price_eur: skipped'); }
 
+    // 9. Clés DCA + coupe-circuit (défauts sûrs : DCA désactivé, breaker à -8%)
+    const defaults: Array<[string, string]> = [
+      ['dca_enabled', 'false'],
+      ['dca_amount_eur', '50'],
+      ['dca_weekday', '1'],
+      ['dca_symbols', 'BTC,ETH'],
+      ['circuit_breaker_enabled', 'true'],
+      ['circuit_breaker_pct', '8'],
+    ];
+    for (const [key, value] of defaults) {
+      try {
+        await sql`INSERT INTO bot_config (key, value) VALUES (${key}, ${value}) ON CONFLICT (key) DO NOTHING`;
+        migrations.push(`config ${key}: défaut assuré`);
+      } catch { migrations.push(`config ${key}: skipped`); }
+    }
+
     // Return current state for verification
     const config = (await sql`SELECT key, value FROM bot_config ORDER BY key`) as Array<{ key: string; value: string }>;
     const portfolioRows = (await sql`SELECT symbol, amount, env FROM portfolio ORDER BY env, symbol`) as Array<{ symbol: string; amount: string; env: string }>;

@@ -377,6 +377,29 @@ export function applyTradeToMemSummary(
   portfolio.total_value_eur = portfolio.cash_eur + portfolio.crypto_value_eur;
 }
 
+// Variation du portefeuille sur ~24h (snapshots), pour le coupe-circuit.
+// null si historique insuffisant. Jamais bloquant.
+export async function getDrawdown24h(
+  ctx: DbContext | undefined,
+  env: string,
+): Promise<number | null> {
+  const db = dbFor(ctx);
+  try {
+    const snaps = (await db`
+      SELECT total_value_eur, snapshotted_at FROM portfolio_snapshots
+      WHERE env = ${env} AND snapshotted_at > NOW() - INTERVAL '30 hours'
+      ORDER BY snapshotted_at ASC
+    `) as Row[];
+    if (snaps.length < 2) return null;
+    const first = parseFloat(str(snaps[0], 'total_value_eur'));
+    const last = parseFloat(str(snaps[snaps.length - 1], 'total_value_eur'));
+    if (!(first > 0)) return null;
+    return ((last - first) / first) * 100;
+  } catch {
+    return null;
+  }
+}
+
 export async function savePortfolioSnapshot(
   portfolio: PortfolioSummary,
   envOverride?: TradingEnv,

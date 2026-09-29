@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro, Bell, BellOff } from 'lucide-react';
+import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro, Bell, BellOff, CalendarClock, OctagonX } from 'lucide-react';
 
 interface Config {
   risk_level: string;
@@ -13,7 +13,15 @@ interface Config {
   max_position_size_pct: string;
   initial_portfolio_eur: string;
   telegram_muted?: string;
+  dca_enabled?: string;
+  dca_amount_eur?: string;
+  dca_weekday?: string;
+  dca_symbols?: string;
+  circuit_breaker_enabled?: string;
+  circuit_breaker_pct?: string;
 }
+
+const WEEKDAYS = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
 
 interface Props {
   config: Config;
@@ -83,6 +91,12 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     max_position_size_pct: config.max_position_size_pct ?? '20',
     initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
     telegram_muted: config.telegram_muted ?? 'false',
+    dca_enabled: config.dca_enabled ?? 'false',
+    dca_amount_eur: config.dca_amount_eur ?? '50',
+    dca_weekday: config.dca_weekday ?? '1',
+    dca_symbols: config.dca_symbols ?? 'BTC,ETH',
+    circuit_breaker_enabled: config.circuit_breaker_enabled ?? 'true',
+    circuit_breaker_pct: config.circuit_breaker_pct ?? '8',
   });
   const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
@@ -98,11 +112,35 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
       max_position_size_pct: config.max_position_size_pct ?? '20',
       initial_portfolio_eur: config.initial_portfolio_eur ?? '5000',
       telegram_muted: config.telegram_muted ?? 'false',
+      dca_enabled: config.dca_enabled ?? 'false',
+      dca_amount_eur: config.dca_amount_eur ?? '50',
+      dca_weekday: config.dca_weekday ?? '1',
+      dca_symbols: config.dca_symbols ?? 'BTC,ETH',
+      circuit_breaker_enabled: config.circuit_breaker_enabled ?? 'true',
+      circuit_breaker_pct: config.circuit_breaker_pct ?? '8',
     });
   }, [config]);
 
   const isActive = localConfig.is_active === 'true';
   const isMuted = (localConfig.telegram_muted ?? 'false') === 'true';
+  const dcaOn = (localConfig.dca_enabled ?? 'false') === 'true';
+  const breakerOn = (localConfig.circuit_breaker_enabled ?? 'true') === 'true';
+
+  const toggleDca = async () => {
+    const newVal = dcaOn ? 'false' : 'true';
+    setLocalConfig(prev => ({ ...prev, dca_enabled: newVal }));
+    await updateConfig('dca_enabled', newVal);
+    setMessage(dcaOn ? 'Achats programmés désactivés' : 'Achats programmés activés');
+    setTimeout(() => setMessage(''), 3000);
+  };
+
+  const toggleBreaker = async () => {
+    const newVal = breakerOn ? 'false' : 'true';
+    setLocalConfig(prev => ({ ...prev, circuit_breaker_enabled: newVal }));
+    await updateConfig('circuit_breaker_enabled', newVal);
+    setMessage(breakerOn ? 'Coupe-circuit désactivé' : 'Coupe-circuit activé');
+    setTimeout(() => setMessage(''), 3000);
+  };
 
   const updateConfig = useCallback(async (key: string, value: string) => {
     try {
@@ -336,6 +374,99 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
               </button>
             ))}
           </div>
+        </div>
+
+        {/* Achats programmés (DCA) */}
+        <div className="p-3 rounded-xl border bg-gray-800/50 border-gray-700/50 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CalendarClock className="w-4 h-4 text-blue-400 flex-shrink-0" />
+              <div>
+                <div className="text-gray-300 text-sm font-semibold">Achats programmés</div>
+                <div className="text-gray-500 text-xs mt-0.5">DCA hebdo, même si coupe-circuit</div>
+              </div>
+            </div>
+            <button
+              onClick={toggleDca}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${dcaOn ? 'bg-blue-500/20 text-blue-300 border-blue-500/40' : 'bg-gray-700 text-gray-400 border-gray-600 hover:text-gray-200'}`}
+            >
+              {dcaOn ? 'Activé' : 'Désactivé'}
+            </button>
+          </div>
+          {dcaOn && (
+            <div className="grid grid-cols-3 gap-2">
+              <label className="block">
+                <span className="text-gray-500 text-xs">Enveloppe €/sem</span>
+                <input
+                  type="number"
+                  min="10"
+                  step="any"
+                  value={localConfig.dca_amount_eur ?? '50'}
+                  onChange={e => updateConfigDebounced('dca_amount_eur', e.target.value)}
+                  className="mt-1 w-full bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                />
+              </label>
+              <label className="block">
+                <span className="text-gray-500 text-xs">Jour (UTC)</span>
+                <select
+                  value={localConfig.dca_weekday ?? '1'}
+                  onChange={e => {
+                    setLocalConfig(prev => ({ ...prev, dca_weekday: e.target.value }));
+                    updateConfig('dca_weekday', e.target.value);
+                  }}
+                  className="mt-1 w-full bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                >
+                  {WEEKDAYS.map((d, i) => (
+                    <option key={i} value={String(i)}>{d}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-gray-500 text-xs">Actifs</span>
+                <input
+                  type="text"
+                  value={localConfig.dca_symbols ?? 'BTC,ETH'}
+                  onChange={e => updateConfigDebounced('dca_symbols', e.target.value.toUpperCase())}
+                  placeholder="BTC,ETH"
+                  className="mt-1 w-full bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500"
+                />
+              </label>
+            </div>
+          )}
+        </div>
+
+        {/* Coupe-circuit */}
+        <div className="p-3 rounded-xl border bg-gray-800/50 border-gray-700/50 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <OctagonX className="w-4 h-4 text-red-400 flex-shrink-0" />
+              <div>
+                <div className="text-gray-300 text-sm font-semibold">Coupe-circuit</div>
+                <div className="text-gray-500 text-xs mt-0.5">Achats en pause si chute 24h ≥ seuil (stops maintenus)</div>
+              </div>
+            </div>
+            <button
+              onClick={toggleBreaker}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${breakerOn ? 'bg-red-500/20 text-red-300 border-red-500/40' : 'bg-gray-700 text-gray-400 border-gray-600 hover:text-gray-200'}`}
+            >
+              {breakerOn ? 'Activé' : 'Désactivé'}
+            </button>
+          </div>
+          {breakerOn && (
+            <label className="flex items-center gap-2">
+              <span className="text-gray-500 text-xs">Seuil de chute 24h</span>
+              <input
+                type="number"
+                min="2"
+                max="30"
+                step="any"
+                value={localConfig.circuit_breaker_pct ?? '8'}
+                onChange={e => updateConfigDebounced('circuit_breaker_pct', e.target.value)}
+                className="w-20 bg-gray-700 border border-gray-600 text-white text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:border-red-500"
+              />
+              <span className="text-gray-500 text-xs">%</span>
+            </label>
+          )}
         </div>
 
         {/* Risk level */}

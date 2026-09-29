@@ -10,6 +10,7 @@ export interface FifoTrade {
   action: string;
   amount: number;
   total_eur: number;
+  executed_at?: string;
 }
 
 interface Lot {
@@ -27,6 +28,10 @@ export interface FifoSymbolStats {
 
 export function computeFifo(
   trades: Array<FifoTrade & { fee_eur?: number }>,
+  // sinceTs : les lots sont TOUJOURS traités sur tout l'historique (coût exact),
+  // mais les stats (réalisé, comptes, volume, frais) ne retiennent que la fenêtre.
+  // Sans sinceTs : tout est compté (comportement historique, ex: export fiscal).
+  opts?: { sinceTs?: number },
 ): { perTradeRealized: Array<number | null>; perSymbol: Record<string, FifoSymbolStats> } {
   const lots: Record<string, Lot[]> = {};
   const perSymbol: Record<string, FifoSymbolStats> = {};
@@ -44,15 +49,20 @@ export function computeFifo(
       perTradeRealized.push(null);
       continue;
     }
-    const st = touch(sym);
-    st.fees_eur += fee;
+    // Fenêtre temporelle : date invalide/absente = comptée (fail-open)
+    const ts = t.executed_at ? new Date(t.executed_at).getTime() : NaN;
+    const inWindow =
+      opts?.sinceTs === undefined || !Number.isFinite(ts) || ts >= (opts.sinceTs as number);
+    const st = inWindow ? touch(sym) : undefined;
+    if (st) st.fees_eur += fee;
     if (String(t.action) === 'BUY') {
-      st.buys += 1;
-      st.volume_eur += total;
+      if (st) {
+        st.buys += 1;
+        st.volume_eur += total;
+      }
       (lots[sym] ??= []).push({ qty, unitCost: total / qty });
       perTradeRealized.push(null);
     } else if (String(t.action) === 'SELL') {
-      st.sells += 1;
       const netPerUnit = total / qty;
       let remaining = qty;
       let realized = 0;
@@ -65,7 +75,10 @@ export function computeFifo(
         remaining -= matched;
         if (lot.qty <= 1e-12) queue.shift();
       }
-      st.realized_eur += realized;
+      if (st) {
+        st.sells += 1;
+        st.realized_eur += realized;
+      }
       perTradeRealized.push(Number(realized.toFixed(2)));
     } else {
       perTradeRealized.push(null);

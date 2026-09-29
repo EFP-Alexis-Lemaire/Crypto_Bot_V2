@@ -22,17 +22,30 @@ export interface SymbolPerformance {
   current_price_eur: number;
 }
 
-// GET : performance par crypto — réalisé (FIFO sur l'historique des trades)
-// + latent (positions actuelles) = total. Trié du meilleur au pire.
+// Périodes supportées (?period=) : réalisé/comptes filtrés sur la fenêtre,
+// coût de revient TOUJOURS calculé sur tout l'historique (FIFO exact).
+const PERIOD_MS: Record<string, number> = {
+  '1d': 24 * 3600 * 1000,
+  '7d': 7 * 24 * 3600 * 1000,
+  '30d': 30 * 24 * 3600 * 1000,
+  '1y': 365 * 24 * 3600 * 1000,
+};
+
+// GET : performance par crypto — réalisé (FIFO) + latent (positions) = total.
+// Trié du meilleur au pire. Le latent est toujours "actuel", seul le réalisé
+// et les compteurs suivent la période.
 export async function GET(request: Request) {
   try {
     const ctx = getDbContext(request);
     const db = sqlForContext(ctx);
+    const url = new URL(request.url);
+    const period = url.searchParams.get('period') ?? 'all';
+    const sinceTs = PERIOD_MS[period] ? Date.now() - PERIOD_MS[period] : undefined;
     const modeRows = (await db`SELECT value FROM bot_config WHERE key = 'trading_mode'`) as Array<{ value: string }>;
     const env = modeRows[0]?.value === 'live' ? 'live' : 'paper';
 
     const trades = (await db`
-      SELECT symbol, action, amount, total_eur, fee_eur
+      SELECT symbol, action, amount, total_eur, fee_eur, executed_at
       FROM trades
       WHERE env = ${env} AND action IN ('BUY', 'SELL')
       ORDER BY executed_at ASC, id ASC
@@ -47,7 +60,9 @@ export async function GET(request: Request) {
         amount: num(t.amount),
         total_eur: num(t.total_eur),
         fee_eur: num(t.fee_eur),
-      }))
+        executed_at: String(t.executed_at),
+      })),
+      sinceTs !== undefined ? { sinceTs } : undefined
     );
 
     // Latent : positions actuelles valorisées au prix marché
@@ -95,7 +110,7 @@ export async function GET(request: Request) {
       fees_eur: Number(rows.reduce((s, r) => s + r.fees_eur, 0).toFixed(2)),
     };
 
-    return NextResponse.json({ performance: rows, totals, env, ctx });
+    return NextResponse.json({ performance: rows, totals, env, ctx, period });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to compute performance', details: String(error) }, { status: 500 });
   }

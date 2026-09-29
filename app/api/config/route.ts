@@ -36,6 +36,12 @@ export async function POST(request: Request) {
       'is_active',
       'initial_portfolio_eur',
       'telegram_muted',
+      'dca_enabled',
+      'dca_amount_eur',
+      'dca_weekday',
+      'dca_symbols',
+      'circuit_breaker_enabled',
+      'circuit_breaker_pct',
     ];
 
     if (!allowedKeys.includes(key)) {
