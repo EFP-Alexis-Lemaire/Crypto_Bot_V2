@@ -102,6 +102,11 @@ export default function Dashboard() {
   const [performance, setPerformance] = useState<SymbolPerformance[]>([]);
   const [perfTotals, setPerfTotals] = useState<{ realized_eur: number; unrealized_eur: number; fees_eur: number } | null>(null);
   const [perfPeriod, setPerfPeriod] = useState('all');
+  const [perfDegraded, setPerfDegraded] = useState(false);
+  // Miroir ref : fetchAll garde la période sans en dépendre (pas de refetch global)
+  const perfPeriodRef = useRef(perfPeriod);
+  perfPeriodRef.current = perfPeriod;
+
   const [health, setHealth] = useState<React.ComponentProps<typeof HealthStrip>['health']>(null);
   const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
     // Default to PROD when running on production Vercel deployment
@@ -111,6 +116,20 @@ export default function Dashboard() {
     }
     return 'uat'; // will be overridden below via useEffect
   });
+
+  // Fetch isolé : changer de période ne recharge QUE ce tableau
+  // (le graphique a son propre filtre interne, indépendant)
+  const fetchPerformance = useCallback(async (period: string) => {
+    try {
+      const res = await fetch(`/api/performance?period=${period}`, { headers: { 'x-db-context': dbContext } });
+      if (res.ok) {
+        const data = await res.json();
+        setPerformance(data.performance ?? []);
+        setPerfTotals(data.totals ?? null);
+        setPerfDegraded(data.degraded ?? false);
+      }
+    } catch { /* silent : on garde les dernières données */ }
+  }, [dbContext]);
   const isMounted = useRef(false);
 
   // On first load: detect deployment env and restore saved preference
@@ -135,7 +154,7 @@ export default function Dashboard() {
   const fetchAll = useCallback(async () => {
     const dbHeaders = { 'x-db-context': dbContext };
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, perfRes, healthRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, healthRes] =
         await Promise.all([
           fetch('/api/portfolio', { headers: dbHeaders }),
           fetch('/api/decisions?limit=20', { headers: dbHeaders }),
@@ -145,9 +164,9 @@ export default function Dashboard() {
           fetch('/api/cycles?limit=30', { headers: dbHeaders }),
           fetch('/api/morning-report', { headers: dbHeaders }),
           fetch('/api/ai-costs', { headers: dbHeaders }),
-          fetch(`/api/performance?period=${perfPeriod}`, { headers: dbHeaders }),
           fetch('/api/health', { headers: dbHeaders }),
         ]);
+      await fetchPerformance(perfPeriodRef.current);
 
       if (portfolioRes.ok) {
         const data = await portfolioRes.json();
@@ -193,12 +212,6 @@ export default function Dashboard() {
         setAiCosts(data.costs ?? null);
       }
 
-      if (perfRes.ok) {
-        const data = await perfRes.json();
-        setPerformance(data.performance ?? []);
-        setPerfTotals(data.totals ?? null);
-      }
-
       if (healthRes.ok) {
         setHealth(await healthRes.json());
       }
@@ -209,7 +222,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [dbContext, perfPeriod]);
+  }, [dbContext, fetchPerformance]);
 
   useEffect(() => {
     isMounted.current = true;
@@ -465,8 +478,14 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Performances par crypto (meilleures → pires) */}
-            <PerformanceTable rows={performance} totals={perfTotals} period={perfPeriod} onPeriodChange={setPerfPeriod} />
+            {/* Performances par crypto (meilleures → pires) — filtre indépendant du graphique */}
+            <PerformanceTable
+              rows={performance}
+              totals={perfTotals}
+              period={perfPeriod}
+              degraded={perfDegraded}
+              onPeriodChange={(p) => { setPerfPeriod(p); fetchPerformance(p); }}
+            />
 
             {/* Holdings Table — poussières (< 1€) masquées, filtre exchange */}
             {portfolio && portfolio.holdings.length > 0 && (() => {

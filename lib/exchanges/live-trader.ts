@@ -201,9 +201,10 @@ export async function executeLiveTrade(
       const prevRows = (await db`SELECT amount, avg_buy_price_eur FROM portfolio WHERE symbol = ${decision.symbol} AND env = 'live'`) as Row[];
       const prevAvg = prevRows.length > 0 ? parseFloat(String(prevRows[0].avg_buy_price_eur ?? 0)) : 0;
 
-      // Sync BOTH : un sync mono-exchange supprimerait de la DB les positions
-      // détenues sur l'autre exchange (la suppression se base sur les symboles absents)
-      await syncPortfolioFromExchange('both');
+      // Sync BOTH en frais (post-trade : on veut la réalité, pas le cache 30s).
+      // Un sync mono-exchange supprimerait de la DB les positions détenues
+      // sur l'autre exchange (la suppression se base sur les symboles absents).
+      await syncPortfolioFromExchange('both', { fresh: true });
 
       // Prix moyen pondéré (le coût réel inclut les frais : actualAmount).
       // Si l'ancien avg est inconnu (0), on prend le coût unitaire du nouveau lot
@@ -327,7 +328,8 @@ export async function executeLiveTrade(
       if (done.length > 0) {
         // L'avg d'achat ne change pas à la vente (moyenne conservée sur le reliquat).
         // Vente partielle (TP 50%) : on lève le flag pour viser le palier 2 ensuite.
-        await syncPortfolioFromExchange('both');
+        // Sync en frais (post-trade).
+        await syncPortfolioFromExchange('both', { fresh: true });
         if (decision.partial) {
           try {
             await db`UPDATE portfolio SET partial_tp_taken = TRUE, updated_at = NOW() WHERE symbol = ${decision.symbol} AND env = 'live'`;
@@ -367,13 +369,14 @@ export async function executeLiveTrade(
 }
 
 export async function syncPortfolioFromExchange(
-  exchange: 'kraken' | 'coinbase' | 'both' = 'both'
+  exchange: 'kraken' | 'coinbase' | 'both' = 'both',
+  opts?: { fresh?: boolean }
 ): Promise<void> {
   try {
     let balances: Record<string, number> = {};
 
     if (exchange === 'kraken' || exchange === 'both') {
-      const krakenBalances = await getKrakenBalance();
+      const krakenBalances = await getKrakenBalance(opts);
       for (const [symbol, amount] of Object.entries(krakenBalances)) {
         balances[symbol] = (balances[symbol] ?? 0) + amount;
       }
@@ -381,7 +384,7 @@ export async function syncPortfolioFromExchange(
 
     if (exchange === 'coinbase' || exchange === 'both') {
       try {
-        const coinbaseBalances = await getCoinbaseBalance();
+        const coinbaseBalances = await getCoinbaseBalance(opts);
         for (const [symbol, amount] of Object.entries(coinbaseBalances)) {
           balances[symbol] = (balances[symbol] ?? 0) + amount;
         }

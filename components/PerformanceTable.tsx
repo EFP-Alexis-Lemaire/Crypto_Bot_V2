@@ -29,6 +29,7 @@ interface Props {
   rows: SymbolPerformance[];
   totals: { realized_eur: number; unrealized_eur: number; fees_eur: number } | null;
   period?: string;
+  degraded?: boolean;
   onPeriodChange?: (p: string) => void;
 }
 
@@ -37,7 +38,7 @@ function eur(v: number, signed = true) {
   return `${sign}${v.toFixed(2)}€`;
 }
 
-export default function PerformanceTable({ rows, totals, period = 'all', onPeriodChange }: Props) {
+export default function PerformanceTable({ rows, totals, period = 'all', degraded = false, onPeriodChange }: Props) {
   // Poussières (< 1€, sans trades ni P&L) masquées par défaut pour garder le focus
   const significant = rows.filter(r => Math.abs(r.total_eur) >= 0.01 || r.buys > 0 || r.sells > 0 || r.holding_value_eur >= 5);
   const dustCount = rows.length - significant.length;
@@ -67,6 +68,12 @@ export default function PerformanceTable({ rows, totals, period = 'all', onPerio
           </div>
         )}
         {totals && (
+          <>
+          {degraded && (
+            <span className="text-yellow-400/90" title="Exchanges ou marché injoignables : positions latentes indisponibles">
+              ⚠ partiel (réalisé seul)
+            </span>
+          )}
           <div className="flex items-center gap-3 text-xs">
             <span className="text-gray-600">
               {period === 'all' ? 'Tout' : PERIODS.find(p => p.key === period)?.label} · réalisé/frais sur période, latent actuel
@@ -79,6 +86,7 @@ export default function PerformanceTable({ rows, totals, period = 'all', onPerio
             </span>
             <span className="text-gray-600">Frais : {totals.fees_eur.toFixed(2)}€</span>
           </div>
+          </>
         )}
       </div>
 

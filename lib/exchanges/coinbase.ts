@@ -87,7 +87,13 @@ export interface CoinbaseAccount {
   hold: { value: string; currency: string };
 }
 
-export async function getCoinbaseBalance(): Promise<Record<string, number>> {
+// Même cache court que Kraken (voir kraken.ts) : les lectures dashboard
+// partagent 1 appel / 30s. `fresh: true` force un appel réel (post-trade).
+let _balCache: { at: number; data: Record<string, number> } | null = null;
+let _balPending: Promise<Record<string, number>> | null = null;
+const BAL_TTL_MS = 30 * 1000;
+
+async function fetchCoinbaseBalance(): Promise<Record<string, number>> {
   const balances: Record<string, number> = {};
   let cursor: string | undefined;
 
@@ -117,6 +123,27 @@ export async function getCoinbaseBalance(): Promise<Record<string, number>> {
   } while (cursor);
 
   return balances;
+}
+
+export async function getCoinbaseBalance(opts?: { fresh?: boolean }): Promise<Record<string, number>> {
+  const now = Date.now();
+  if (!opts?.fresh && _balCache && now - _balCache.at < BAL_TTL_MS) {
+    return _balCache.data;
+  }
+  if (!opts?.fresh && _balPending) {
+    return _balPending;
+  }
+  const p = (async () => {
+    const data = await fetchCoinbaseBalance();
+    _balCache = { at: Date.now(), data };
+    return data;
+  })();
+  if (!opts?.fresh) _balPending = p;
+  try {
+    return await p;
+  } finally {
+    if (_balPending === p) _balPending = null;
+  }
 }
 
 function formatCoinbaseApiError(data: unknown): string {

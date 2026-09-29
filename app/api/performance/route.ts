@@ -65,22 +65,32 @@ export async function GET(request: Request) {
       sinceTs !== undefined ? { sinceTs } : undefined
     );
 
-    // Latent : positions actuelles valorisées au prix marché
-    const marketData = await getMarketData(WATCHLIST_COINS);
-    const portfolio = await getPortfolioSummary(marketData, env as 'paper' | 'live', ctx);
+    // Latent : positions actuelles valorisées au prix marché.
+    // Résilient : si les exchanges ou le marché flanchent (rate-limit, nonce...),
+    // on renvoie quand même le réalisé (calculé sur la DB) en mode dégradé
+    // plutôt qu'une 500 qui fige le filtre.
+    let marketData: Awaited<ReturnType<typeof getMarketData>> = [];
+    let degraded = false;
+    const held: Record<string, { value: number; pnl: number; avg: number; price: number }> = {};
+    try {
+      marketData = await getMarketData(WATCHLIST_COINS);
+      const portfolio = await getPortfolioSummary(marketData, env as 'paper' | 'live', ctx);
+      for (const h of portfolio.holdings) {
+        held[h.symbol] = {
+          value: h.current_value_eur,
+          pnl: h.pnl_eur,
+          avg: h.avg_buy_price_eur,
+          price: h.current_price_eur,
+        };
+        // Position sans trades dans l'historique (ex: pré-existante) : ligne à zéro
+        stats[h.symbol] ??= { buys: 0, sells: 0, volume_eur: 0, fees_eur: 0, realized_eur: 0 };
+      }
+    } catch (e) {
+      degraded = true;
+      console.warn('[Performance] mode dégradé (réalisé seul):', e instanceof Error ? e.message : String(e));
+    }
     const priceMap: Record<string, { price: number; name: string }> = {};
     marketData.forEach(m => { priceMap[m.symbol] = { price: m.price_eur, name: m.name }; });
-    const held: Record<string, { value: number; pnl: number; avg: number; price: number }> = {};
-    for (const h of portfolio.holdings) {
-      held[h.symbol] = {
-        value: h.current_value_eur,
-        pnl: h.pnl_eur,
-        avg: h.avg_buy_price_eur,
-        price: h.current_price_eur,
-      };
-      // Position sans trades dans l'historique (ex: pré-existante) : ligne à zéro
-      stats[h.symbol] ??= { buys: 0, sells: 0, volume_eur: 0, fees_eur: 0, realized_eur: 0 };
-    }
 
     const rows: SymbolPerformance[] = Object.entries(stats).map(([symbol, st]) => {
       const h = held[symbol];
@@ -110,7 +120,7 @@ export async function GET(request: Request) {
       fees_eur: Number(rows.reduce((s, r) => s + r.fees_eur, 0).toFixed(2)),
     };
 
-    return NextResponse.json({ performance: rows, totals, env, ctx, period });
+    return NextResponse.json({ performance: rows, totals, env, ctx, period, degraded });
   } catch (error) {
     return NextResponse.json({ error: 'Failed to compute performance', details: String(error) }, { status: 500 });
   }

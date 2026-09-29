@@ -3,6 +3,23 @@ import axios from 'axios';
 
 const KRAKEN_API_URL = 'https://api.kraken.com';
 
+// Nonce strictement croissant : Date.now() seul entre en collision quand
+// plusieurs appels privés partent la même milliseconde (refresh dashboard =
+// ~6 appels concurrents) → Kraken rejette avec "EAPI:Invalid nonce".
+let _lastNonce = 0;
+function nextNonce(): string {
+  const now = Date.now();
+  _lastNonce = Math.max(now, _lastNonce + 1);
+  return String(_lastNonce);
+}
+
+// Cache court + dédup des appels concurrents : un refresh dashboard
+// (portfolio + performance + santé + balances) partage 1 seul appel / 30s
+// au lieu de marteler l'API. `fresh: true` force un appel réel (post-trade).
+let _balCache: { at: number; data: Record<string, number> } | null = null;
+let _balPending: Promise<Record<string, number>> | null = null;
+const BAL_TTL_MS = 30 * 1000;
+
 function getKrakenSignature(
   path: string,
   nonce: string,
@@ -32,7 +49,7 @@ async function krakenPrivate(
     throw new Error('Kraken API keys not configured');
   }
 
-  const nonce = Date.now().toString();
+  const nonce = nextNonce();
   const path = `/0/private/${endpoint}`;
   const postData = new URLSearchParams({ nonce, ...params as Record<string, string> }).toString();
   const signature = getKrakenSignature(path, nonce, postData, apiSecret);
@@ -72,7 +89,7 @@ export interface KrakenBalance {
   [currency: string]: string;
 }
 
-export async function getKrakenBalance(): Promise<Record<string, number>> {
+async function fetchKrakenBalance(): Promise<Record<string, number>> {
   const result = await krakenPrivate('Balance') as KrakenBalance;
   const balances: Record<string, number> = {};
   for (const [currency, amount] of Object.entries(result)) {
@@ -84,6 +101,27 @@ export async function getKrakenBalance(): Promise<Record<string, number>> {
     }
   }
   return balances;
+}
+
+export async function getKrakenBalance(opts?: { fresh?: boolean }): Promise<Record<string, number>> {
+  const now = Date.now();
+  if (!opts?.fresh && _balCache && now - _balCache.at < BAL_TTL_MS) {
+    return _balCache.data;
+  }
+  if (!opts?.fresh && _balPending) {
+    return _balPending;
+  }
+  const p = (async () => {
+    const data = await fetchKrakenBalance();
+    _balCache = { at: Date.now(), data };
+    return data;
+  })();
+  if (!opts?.fresh) _balPending = p;
+  try {
+    return await p;
+  } finally {
+    if (_balPending === p) _balPending = null;
+  }
 }
 
 export async function getKrakenTicker(pair: string): Promise<{
