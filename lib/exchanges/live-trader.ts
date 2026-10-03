@@ -4,12 +4,14 @@ import {
   placeKrakenOrder,
   getKrakenBalance,
   resolveKrakenPair,
+  clearKrakenBalanceCache,
   SYMBOL_TO_KRAKEN_PAIR,
 } from './kraken';
 import {
   placeCoinbaseOrder,
   getCoinbaseBalance,
   isCoinbaseProductTradable,
+  clearCoinbaseBalanceCache,
   SYMBOL_TO_COINBASE_PRODUCT,
 } from './coinbase';
 
@@ -70,7 +72,9 @@ const ROUTING_DUST_EUR = 2;
 // - sinon null (aucun exchange ne peut payer le montant plein -> SKIP, pas d'exécution partielle qui vide un exchange)
 export async function chooseExchangeForBuy(
   symbol: string,
-  amountEur: number
+  amountEur: number,
+  // Exchange à exclure (retry après un échec "fonds insuffisants" dessus)
+  exclude?: 'kraken' | 'coinbase'
 ): Promise<{ exchange: 'kraken' | 'coinbase' | null; krakenCash: number; coinbaseCash: number; reason: string; cappedAmount?: number }> {
   // Kraken : mapping statique + découverte dynamique des paires EUR
   // (endpoint public). Coinbase : mapping + vérification produit ci-dessous.
@@ -89,14 +93,14 @@ export async function chooseExchangeForBuy(
     coinbaseProductOk = await isCoinbaseProductTradable(productId);
     if (!coinbaseProductOk) coinbaseProductReason = `${productId} non listé/tradable sur Coinbase (compte/région)`;
   }
-  const krakenFits = onKraken && kraken >= 5 && amountEur <= kraken * 0.95;
-  const coinbaseFits = onCoinbase && coinbaseProductOk && coinbase >= 5 && amountEur <= coinbase * 0.95;
+  const krakenFits = onKraken && exclude !== 'kraken' && kraken >= 5 && amountEur <= kraken * 0.95;
+  const coinbaseFits = onCoinbase && exclude !== 'coinbase' && coinbaseProductOk && coinbase >= 5 && amountEur <= coinbase * 0.95;
   if (krakenFits) {
     return { exchange: 'kraken', krakenCash: kraken, coinbaseCash: coinbase, reason: `Kraken peut couvrir ${amountEur.toFixed(2)}€ (solde ${kraken.toFixed(2)}€)` };
   }
   // Écart poussière sur Kraken (ex: 205.27€ demandés, 205.16€ dispo) : on ajuste
   // au solde brut et on reste sur Kraken plutôt que payer plus cher sur Coinbase
-  if (onKraken && kraken >= 5 && amountEur > kraken * 0.95 && amountEur - kraken <= ROUTING_DUST_EUR) {
+  if (onKraken && exclude !== 'kraken' && kraken >= 5 && amountEur > kraken * 0.95 && amountEur - kraken <= ROUTING_DUST_EUR) {
     const capped = Math.floor(kraken * 100) / 100;
     if (capped >= 5) {
       return { exchange: 'kraken', krakenCash: kraken, coinbaseCash: coinbase, cappedAmount: capped, reason: `Montant ajusté à ${capped.toFixed(2)}€ pour tenir sur Kraken (solde ${kraken.toFixed(2)}€, frais réduits)` };
@@ -109,7 +113,7 @@ export async function chooseExchangeForBuy(
     return { exchange: 'coinbase', krakenCash: kraken, coinbaseCash: coinbase, reason: `${why} (solde ${coinbase.toFixed(2)}€)` };
   }
   // Même tolérance côté Coinbase avant de déclarer forfait
-  if (onCoinbase && coinbaseProductOk && coinbase >= 5 && amountEur > coinbase * 0.95 && amountEur - coinbase <= ROUTING_DUST_EUR) {
+  if (onCoinbase && exclude !== 'coinbase' && coinbaseProductOk && coinbase >= 5 && amountEur > coinbase * 0.95 && amountEur - coinbase <= ROUTING_DUST_EUR) {
     const capped = Math.floor(coinbase * 100) / 100;
     if (capped >= 5) {
       return { exchange: 'coinbase', krakenCash: kraken, coinbaseCash: coinbase, cappedAmount: capped, reason: `Montant ajusté à ${capped.toFixed(2)}€ pour tenir sur Coinbase (solde ${coinbase.toFixed(2)}€)` };
@@ -174,24 +178,50 @@ export async function executeLiveTrade(
       // Routage intelligent: préfère Kraken (frais faibles), bascule sur Coinbase
       // si Kraken ne peut pas couvrir le montant plein. Ne jamais exécuter un
       // montant partiel qui viderait un exchange : si aucun ne couvre -> SKIP.
-      const routing = await chooseExchangeForBuy(decision.symbol, decision.amount_eur);
+      let routing = await chooseExchangeForBuy(decision.symbol, decision.amount_eur);
       if (!routing.exchange) return { success: false, message: routing.reason };
-      const exchange = routing.exchange;
+      let exchange = routing.exchange;
+      let actualAmount = routing.cappedAmount ?? decision.amount_eur;
+      let feeRate = exchange === 'kraken' ? PLATFORM_FEE_RATE_KRAKEN : PLATFORM_FEE_RATE_COINBASE;
 
-      const PLATFORM_FEE_RATE = exchange === 'kraken' ? PLATFORM_FEE_RATE_KRAKEN : PLATFORM_FEE_RATE_COINBASE;
-      const actualAmount = routing.cappedAmount ?? decision.amount_eur;
-      const fee = actualAmount * PLATFORM_FEE_RATE;
-      let txid: string | undefined;
-
-      if (exchange === 'kraken') {
-        const pair = (await resolveKrakenPair(decision.symbol)) ?? SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
-        const result = await placeKrakenOrder(pair, 'buy', ((actualAmount - fee) / currentPrice.price_eur).toFixed(8));
-        txid = result.txid[0];
-      } else {
+      const placeOn = async (ex: 'kraken' | 'coinbase', amount: number): Promise<string> => {
+        const rate = ex === 'kraken' ? PLATFORM_FEE_RATE_KRAKEN : PLATFORM_FEE_RATE_COINBASE;
+        if (ex === 'kraken') {
+          const pair = (await resolveKrakenPair(decision.symbol)) ?? SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
+          const result = await placeKrakenOrder(pair, 'buy', ((amount - amount * rate) / currentPrice.price_eur).toFixed(8));
+          return result.txid[0];
+        }
         const productId = SYMBOL_TO_COINBASE_PRODUCT[decision.symbol];
-        const result = await placeCoinbaseOrder(productId, 'BUY', actualAmount.toFixed(2));
-        txid = result.order_id;
+        const result = await placeCoinbaseOrder(productId, 'BUY', amount.toFixed(2));
+        return result.order_id;
+      };
+
+      let txid: string | undefined;
+      try {
+        txid = await placeOn(exchange, actualAmount);
+      } catch (firstErr) {
+        // Solde bougé entre la lecture et l'ordre (cycle concurrent résiduel,
+        // retrait manuel...) : on vide les caches, on re-route en excluant
+        // l'exchange fautif, et on réessaie UNE fois.
+        if (!/insufficient funds/i.test(formatLiveError(firstErr))) throw firstErr;
+        console.warn(`[LiveTrader] ${exchange} Insufficient funds sur ${decision.symbol}, retry après re-lecture`);
+        clearKrakenBalanceCache();
+        clearCoinbaseBalanceCache();
+        const retry = await chooseExchangeForBuy(decision.symbol, decision.amount_eur, exchange);
+        if (!retry.exchange) {
+          return { success: false, message: `${formatLiveError(firstErr)} — re-tentative impossible : ${retry.reason}` };
+        }
+        exchange = retry.exchange;
+        actualAmount = retry.cappedAmount ?? decision.amount_eur;
+        feeRate = exchange === 'kraken' ? PLATFORM_FEE_RATE_KRAKEN : PLATFORM_FEE_RATE_COINBASE;
+        try {
+          txid = await placeOn(exchange, actualAmount);
+          routing = retry;
+        } catch (secondErr) {
+          return { success: false, message: `${formatLiveError(secondErr)} (après re-routage ${exchange})` };
+        }
       }
+      const fee = actualAmount * feeRate;
 
       const cryptoAmount = (actualAmount - fee) / currentPrice.price_eur;
       await db`INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)

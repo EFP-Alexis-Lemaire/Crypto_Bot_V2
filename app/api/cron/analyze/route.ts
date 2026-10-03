@@ -27,6 +27,7 @@ import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/li
 import { getDrawdownReview } from '@/lib/memory';
 import { runScheduledDca } from '@/lib/dca';
 import { sendTelegramMessage } from '@/lib/telegram';
+import { acquireCycleLock, releaseCycleLock } from '@/lib/cycle-lock';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX, RISK_CONFIGS, MAJOR_SYMBOLS, DIP_MAX_POSITION_PCT } from '@/lib/types';
 import { cronUnauthorized } from '@/lib/cron-auth';
@@ -104,6 +105,15 @@ export async function GET(request: Request) {
       console.log(`[Bot Cycle ${cycleId}] Max trades reached (${tradesExecutedToday}/${maxTrades})`);
       return NextResponse.json({
         message: `Max daily trades reached: ${tradesExecutedToday}/${maxTrades}`,
+      });
+    }
+
+    // Verrou anti-chevauchement : 2 cycles qui tournent ensemble lisent les mêmes
+    // soldes et le 2e se prend "Insufficient funds". Libéré en finally + catch.
+    if (!(await acquireCycleLock(db, cycleId))) {
+      return NextResponse.json({
+        message: 'Un cycle est déjà en cours — analyse ignorée (anti double-dépense)',
+        skipped: true,
       });
     }
 
@@ -598,6 +608,7 @@ export async function GET(request: Request) {
       `[Bot Cycle ${cycleId}] Done. ${executedTrades.length} trades executed.`
     );
 
+    await releaseCycleLock(db);
     return NextResponse.json({
       cycle_id: cycleId,
       ctx: dbContext,
@@ -615,6 +626,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error(`[Bot Cycle ${cycleId}] Error:`, error);
+    await releaseCycleLock(db);
     return NextResponse.json(
       { error: 'Analysis failed', details: String(error) },
       { status: 500 }

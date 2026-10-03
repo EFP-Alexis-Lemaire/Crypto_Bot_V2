@@ -12,6 +12,7 @@ import { getSymbolsUntradableOnCoinbase, SYMBOL_TO_COINBASE_PRODUCT } from '@/li
 import { getDrawdownReview } from '@/lib/memory';
 import { runScheduledDca } from '@/lib/dca';
 import { sendTelegramMessage } from '@/lib/telegram';
+import { acquireCycleLock, releaseCycleLock } from '@/lib/cycle-lock';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX, RISK_CONFIGS, MAJOR_SYMBOLS, DIP_MAX_POSITION_PCT } from '@/lib/types';
 import { v4 as uuidv4 } from 'uuid';
@@ -48,6 +49,17 @@ export async function POST(request: Request) {
 
     if (tradesExecutedToday >= maxTrades) {
       return NextResponse.json({ message: `Max trades atteint (${tradesExecutedToday}/${maxTrades})`, trades_executed: 0, decisions: [] });
+    }
+
+    // Verrou anti-chevauchement (voir analyze) : si un cycle tourne déjà,
+    // on ne lance rien plutôt que risquer un double-spend + Insufficient funds.
+    if (!(await acquireCycleLock(db, cycleId))) {
+      return NextResponse.json({
+        message: 'Un cycle est déjà en cours — analyse ignorée (réessaie dans 1 min)',
+        trades_executed: 0,
+        decisions: [],
+        skipped: true,
+      });
     }
 
     const [marketData, news, fearGreed, eurUsdRate, trendingCoins, defiTVL, btcDominance] = await Promise.all([
@@ -459,6 +471,7 @@ export async function POST(request: Request) {
     const updatedPortfolio = await getPortfolioSummary(allMarketData, undefined, ctx);
     await savePortfolioSnapshot(updatedPortfolio, undefined, ctx);
 
+    await releaseCycleLock(db);
     return NextResponse.json({
       cycle_id: cycleId, trades_executed: tradesExecuted,
       dca_executed: dcaExecuted,
@@ -469,6 +482,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error(`[Trigger ${cycleId}] Error:`, error);
+    await releaseCycleLock(db);
     return NextResponse.json({ error: 'Analyse échouée', details: String(error) }, { status: 500 });
   }
 }

@@ -125,6 +125,12 @@ async function fetchCoinbaseBalance(): Promise<Record<string, number>> {
   return balances;
 }
 
+// Invalide le cache (après un échec "fonds insuffisants" : on relit le vrai solde)
+export function clearCoinbaseBalanceCache(): void {
+  _balCache = null;
+  _balPending = null;
+}
+
 export async function getCoinbaseBalance(opts?: { fresh?: boolean }): Promise<Record<string, number>> {
   const now = Date.now();
   if (!opts?.fresh && _balCache && now - _balCache.at < BAL_TTL_MS) {
