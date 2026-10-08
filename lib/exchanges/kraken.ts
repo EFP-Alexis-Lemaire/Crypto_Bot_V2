@@ -210,7 +210,7 @@ export const SYMBOL_TO_KRAKEN_PAIR: Record<string, string> = {
   ETH: 'XETHZEUR',
   SOL: 'SOLEUR',
   ADA: 'ADAEUR',
-  DOT: 'DOTZEUR',
+  DOT: 'DOTEUR',
   AVAX: 'AVAXEUR',
   LINK: 'LINKEUR',
   UNI: 'UNIEUR',
@@ -227,20 +227,24 @@ export const SYMBOL_TO_KRAKEN_PAIR: Record<string, string> = {
 };
 
 // Découverte dynamique des paires EUR via l'endpoint public AssetPairs
-// (sans auth) : couvre les symboles absents du mapping statique (ex: CRV
-// avant son ajout). Cache 1h, fail-open (null si inaccessible).
-let _pairsCache: { byWsname: Map<string, string>; fetchedAt: number } | null = null;
+// (sans auth) : couvre les symboles absents du mapping statique ET corrige
+// les entrées statiques invalides (ex: DOTZEUR n'existe pas -> DOTEUR).
+// Cache 1h. Si AssetPairs est inaccessible : fail-open sur le statique.
+let _pairsCache: { byWsname: Map<string, string>; known: Set<string>; fetchedAt: number } | null = null;
 const PAIRS_TTL_MS = 60 * 60 * 1000;
 
-async function getKrakenEurPairMap(): Promise<Map<string, string>> {
+async function getKrakenPairMaps(): Promise<{ byWsname: Map<string, string>; known: Set<string> }> {
   if (_pairsCache && Date.now() - _pairsCache.fetchedAt < PAIRS_TTL_MS) {
-    return _pairsCache.byWsname;
+    return _pairsCache;
   }
   const result = await krakenPublic('AssetPairs') as Record<string, {
     altname?: string; wsname?: string; base?: string; quote?: string;
   }>;
   const byWsname = new Map<string, string>();
+  const known = new Set<string>();
   for (const [pairKey, info] of Object.entries(result)) {
+    known.add(pairKey);
+    if (info.altname) known.add(info.altname);
     // wsname "CRV/EUR" est l'identifiant stable ; le quote doit être EUR
     if (info.wsname && info.wsname.endsWith('/EUR')) {
       byWsname.set(info.wsname, pairKey);
@@ -249,15 +253,24 @@ async function getKrakenEurPairMap(): Promise<Map<string, string>> {
       byWsname.set(`${base}/EUR`, pairKey);
     }
   }
-  _pairsCache = { byWsname, fetchedAt: Date.now() };
-  return byWsname;
+  _pairsCache = { byWsname, known, fetchedAt: Date.now() };
+  return _pairsCache;
 }
 
 export async function resolveKrakenPair(symbol: string): Promise<string | null> {
-  if (SYMBOL_TO_KRAKEN_PAIR[symbol]) return SYMBOL_TO_KRAKEN_PAIR[symbol];
+  const statik = SYMBOL_TO_KRAKEN_PAIR[symbol];
   try {
-    return (await getKrakenEurPairMap()).get(`${symbol}/EUR`) ?? null;
+    const { byWsname, known } = await getKrakenPairMaps();
+    // Le statique n'est utilisé que s'il existe vraiment chez Kraken
+    // (sinon EQuery:Unknown asset pair à l'ordre — cas DOT)
+    if (statik && known.has(statik)) return statik;
+    const dyn = byWsname.get(`${symbol}/EUR`) ?? null;
+    if (dyn) {
+      if (statik) console.warn(`[Kraken] mapping statique invalide ${symbol} -> ${statik}, utilisation ${dyn}`);
+      return dyn;
+    }
+    return statik ?? null;
   } catch {
-    return null;
+    return statik ?? null;
   }
 }

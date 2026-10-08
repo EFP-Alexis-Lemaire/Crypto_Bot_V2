@@ -164,6 +164,144 @@ export interface LiveTradeResult {
   chargedEur?: number;
 }
 
+const FEE_KRAKEN = 0.0026;
+const FEE_COINBASE = 0.006;
+
+interface SellLeg {
+  exchange: 'kraken' | 'coinbase';
+  crypto: number;
+  eur: number;
+  feeRate: number;
+}
+
+// Plancher à 8 décimales (jamais d'arrondi vers le haut) : un volume arrondi
+// 1 satoshi AU-DESSUS du solde réel => "Insufficient funds" chez Kraken.
+function floor8(v: number): number {
+  return Math.floor(v * 1e8) / 1e8;
+}
+
+// Soldes réels par exchange pour un symbole (fresh = bypass du cache 30s)
+async function readSellHoldings(symbol: string, fresh: boolean): Promise<{
+  krakenPair: string | null;
+  coinbaseProduct: string | null;
+  kraken: number;
+  coinbase: number;
+}> {
+  const krakenPair = await resolveKrakenPair(symbol);
+  const coinbaseProduct = SYMBOL_TO_COINBASE_PRODUCT[symbol] ?? null;
+  let kraken = 0;
+  let coinbase = 0;
+  if (krakenPair) {
+    try { kraken = (await getKrakenBalance(fresh ? { fresh: true } : undefined))[symbol] ?? 0; } catch {}
+  }
+  if (coinbaseProduct) {
+    try { coinbase = (await getCoinbaseBalance(fresh ? { fresh: true } : undefined))[symbol] ?? 0; } catch {}
+  }
+  return { krakenPair, coinbaseProduct, kraken, coinbase };
+}
+
+// Découpe le montant cible en jambes par exchange (Kraken d'abord, frais faibles).
+// Les volumes sont "floor" (jamais au-dessus du détenu) et les reliquats
+// poussière (< 5€) sont reportés ou abandonnés avec explication.
+function buildSellLegs(
+  symbol: string,
+  priceEur: number,
+  targetEur: number,
+  krakenPair: string | null,
+  coinbaseProduct: string | null,
+  krakenHolding: number,
+  coinbaseHolding: number,
+): { legs: SellLeg[]; dropped: string[] } {
+  const sources: Array<{ exchange: 'kraken' | 'coinbase'; availCrypto: number; feeRate: number }> = [];
+  if (krakenPair && krakenHolding > 1e-9) {
+    sources.push({ exchange: 'kraken', availCrypto: krakenHolding, feeRate: FEE_KRAKEN });
+  }
+  if (coinbaseProduct && coinbaseHolding > 1e-9) {
+    sources.push({ exchange: 'coinbase', availCrypto: coinbaseHolding, feeRate: FEE_COINBASE });
+  }
+
+  const legs: SellLeg[] = [];
+  const dropped: string[] = [];
+  let remaining = targetEur;
+  for (let i = 0; i < sources.length && remaining > 0; i++) {
+    const s = sources[i];
+    const laterAvailEur = sources.slice(i + 1)
+      .reduce((sum, o) => sum + o.availCrypto * priceEur, 0);
+    const takeEur = Math.min(remaining, s.availCrypto * priceEur);
+    if (takeEur <= 0) continue;
+    if (takeEur < MIN_SELL_EUR) {
+      // Reliquat trop petit : reporté sur les exchanges suivants si possible,
+      // abandonné si c'est le dernier bout, sinon vente partielle sur la suite
+      if (remaining <= laterAvailEur + 1e-9) continue;
+      if (takeEur >= remaining - 1e-9) {
+        dropped.push(`reliquat ${takeEur.toFixed(2)}€ sur ${s.exchange} < ${MIN_SELL_EUR}€, abandonné`);
+        remaining = 0;
+        continue;
+      }
+      continue;
+    }
+    // Jambe quasi-totale du détenu sur cet exchange : on prend le solde exact
+    // (floor), pas le montant calculé (évite de dépasser d'1 satoshi)
+    const rawCrypto = takeEur / priceEur;
+    const crypto = floor8(rawCrypto >= s.availCrypto * 0.9999 ? s.availCrypto : rawCrypto);
+    if (crypto <= 0) {
+      dropped.push(`volume nul après arrondi sur ${s.exchange}, abandonné`);
+      continue;
+    }
+    const dustReason = isDustSell(symbol, crypto, takeEur);
+    if (dustReason) {
+      console.log(`[LiveTrader] ${dustReason}`);
+      dropped.push(dustReason);
+      continue;
+    }
+    legs.push({ exchange: s.exchange, crypto, eur: takeEur, feeRate: s.feeRate });
+    remaining -= takeEur;
+  }
+  return { legs, dropped };
+}
+
+interface SellDone {
+  exchange: 'kraken' | 'coinbase';
+  crypto: number;
+  net: number;
+  fee: number;
+}
+
+// Exécute les jambes (une ligne de trade par jambe, pour traçabilité)
+async function execSellLegs(
+  symbol: string,
+  currentPrice: { price_eur: number; price_usd: number },
+  eurUsdRate: number,
+  reasoning: string,
+  confidence: number,
+  legs: SellLeg[],
+): Promise<{ done: SellDone[]; errors: string[]; txid?: string }> {
+  const done: SellDone[] = [];
+  const errors: string[] = [];
+  let txid: string | undefined;
+  for (const leg of legs) {
+    try {
+      const fee = leg.eur * leg.feeRate;
+      const net = leg.eur - fee;
+      if (leg.exchange === 'kraken') {
+        const pair = (await resolveKrakenPair(symbol)) ?? SYMBOL_TO_KRAKEN_PAIR[symbol];
+        const result = await placeKrakenOrder(pair, 'sell', leg.crypto.toFixed(8));
+        txid = txid ?? result.txid[0];
+      } else {
+        const productId = SYMBOL_TO_COINBASE_PRODUCT[symbol];
+        const result = await placeCoinbaseOrder(productId, 'SELL', undefined, leg.crypto.toFixed(8));
+        txid = txid ?? result.order_id;
+      }
+      await db`INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
+        VALUES (${symbol}, 'SELL', ${leg.crypto}, ${currentPrice.price_eur}, ${currentPrice.price_usd}, ${eurUsdRate}, ${net}, ${fee}, 'live', ${reasoning + ` (via ${leg.exchange})`}, ${confidence}, 'live')`;
+      done.push({ exchange: leg.exchange, crypto: leg.crypto, net, fee });
+    } catch (e) {
+      errors.push(`${leg.exchange}: ${formatLiveError(e)}`);
+    }
+  }
+  return { done, errors, txid };
+}
+
 export async function executeLiveTrade(
   decision: BotDecision,
   currentPrice: MarketData,
@@ -264,18 +402,8 @@ export async function executeLiveTrade(
       // Vente multi-exchange : l'actif peut être réparti sur Kraken ET Coinbase
       // (ex: UNI des deux côtés). On vend jambe par jambe, Kraken d'abord
       // (frais faibles), en sautant les reliquats poussière (< 5€).
-      const krakenPair = await resolveKrakenPair(decision.symbol);
-      const coinbaseProduct = SYMBOL_TO_COINBASE_PRODUCT[decision.symbol] ?? null;
-
-      let krakenHolding = 0;
-      let coinbaseHolding = 0;
-      if (krakenPair) {
-        try { krakenHolding = (await getKrakenBalance())[decision.symbol] ?? 0; } catch {}
-      }
-      if (coinbaseProduct) {
-        try { coinbaseHolding = (await getCoinbaseBalance())[decision.symbol] ?? 0; } catch {}
-      }
-      const totalHolding = krakenHolding + coinbaseHolding;
+      const first = await readSellHoldings(decision.symbol, false);
+      const totalHolding = first.kraken + first.coinbase;
       if (totalHolding <= 0.000001) {
         return { success: false, message: `Aucune position ${decision.symbol} trouvée sur Kraken ou Coinbase` };
       }
@@ -286,72 +414,39 @@ export async function executeLiveTrade(
         return { success: false, message: `Poussière ignorée: vente ${decision.symbol} de ${targetEur.toFixed(2)}€ < ${MIN_SELL_EUR}€ minimum exchange` };
       }
 
-      // Construction des jambes (Kraken d'abord)
-      const sources: Array<{ exchange: 'kraken' | 'coinbase'; availCrypto: number; feeRate: number }> = [];
-      if (krakenPair && krakenHolding > 1e-9) {
-        sources.push({ exchange: 'kraken', availCrypto: krakenHolding, feeRate: PLATFORM_FEE_RATE_KRAKEN });
-      }
-      if (coinbaseProduct && coinbaseHolding > 1e-9) {
-        sources.push({ exchange: 'coinbase', availCrypto: coinbaseHolding, feeRate: PLATFORM_FEE_RATE_COINBASE });
-      }
-
-      const legs: Array<{ exchange: 'kraken' | 'coinbase'; crypto: number; eur: number; feeRate: number }> = [];
-      const dropped: string[] = [];
-      let remaining = targetEur;
-      for (let i = 0; i < sources.length && remaining > 0; i++) {
-        const s = sources[i];
-        const laterAvailEur = sources.slice(i + 1)
-          .reduce((sum, o) => sum + o.availCrypto * currentPrice.price_eur, 0);
-        const takeEur = Math.min(remaining, s.availCrypto * currentPrice.price_eur);
-        if (takeEur <= 0) continue;
-        if (takeEur < MIN_SELL_EUR) {
-          // Reliquat trop petit : reporté sur les exchanges suivants si possible,
-          // abandonné si c'est le dernier bout, sinon vente partielle sur la suite
-          if (remaining <= laterAvailEur + 1e-9) continue;
-          if (takeEur >= remaining - 1e-9) {
-            dropped.push(`reliquat ${takeEur.toFixed(2)}€ sur ${s.exchange} < ${MIN_SELL_EUR}€, abandonné`);
-            remaining = 0;
-            continue;
-          }
-          continue;
-        }
-        const crypto = takeEur / currentPrice.price_eur;
-        const dustReason = isDustSell(decision.symbol, crypto, takeEur);
-        if (dustReason) {
-          console.log(`[LiveTrader] ${dustReason}`);
-          dropped.push(dustReason);
-          continue;
-        }
-        legs.push({ exchange: s.exchange, crypto, eur: takeEur, feeRate: s.feeRate });
-        remaining -= takeEur;
-      }
-
-      if (legs.length === 0) {
+      const price = { price_eur: currentPrice.price_eur, price_usd: currentPrice.price_usd };
+      const built = buildSellLegs(decision.symbol, currentPrice.price_eur, targetEur,
+        first.krakenPair, first.coinbaseProduct, first.kraken, first.coinbase);
+      const dropped: string[] = [...built.dropped];
+      if (built.legs.length === 0) {
         return { success: false, message: `Vente ${decision.symbol} impossible : ${dropped.join(' ; ') || 'montants sous les minimums exchange'}` };
       }
 
-      // Exécution jambe par jambe (une ligne de trade par jambe, pour traçabilité)
-      let txid: string | undefined;
-      const done: Array<{ exchange: 'kraken' | 'coinbase'; crypto: number; net: number; fee: number }> = [];
-      const errors: string[] = [];
-      for (const leg of legs) {
-        try {
-          const fee = leg.eur * leg.feeRate;
-          const net = leg.eur - fee;
-          if (leg.exchange === 'kraken') {
-            const pair = (await resolveKrakenPair(decision.symbol)) ?? SYMBOL_TO_KRAKEN_PAIR[decision.symbol];
-            const result = await placeKrakenOrder(pair, 'sell', leg.crypto.toFixed(8));
-            txid = txid ?? result.txid[0];
-          } else {
-            const productId = SYMBOL_TO_COINBASE_PRODUCT[decision.symbol];
-            const result = await placeCoinbaseOrder(productId, 'SELL', undefined, leg.crypto.toFixed(8));
-            txid = txid ?? result.order_id;
-          }
-          await db`INSERT INTO trades (symbol, action, amount, price_eur, price_usd, eur_usd_rate, total_eur, fee_eur, mode, reasoning, confidence, env)
-            VALUES (${decision.symbol}, 'SELL', ${leg.crypto}, ${currentPrice.price_eur}, ${currentPrice.price_usd}, ${eurUsdRate}, ${net}, ${fee}, 'live', ${decision.reasoning + ` (via ${leg.exchange})`}, ${decision.confidence}, 'live')`;
-          done.push({ exchange: leg.exchange, crypto: leg.crypto, net, fee });
-        } catch (e) {
-          errors.push(`${leg.exchange}: ${formatLiveError(e)}`);
+      let exec = await execSellLegs(decision.symbol, price, eurUsdRate,
+        decision.reasoning, decision.confidence, built.legs);
+      let done = exec.done;
+      const errors: string[] = [...exec.errors];
+      let txid = exec.txid;
+      let shortfall = targetEur - done.reduce((s, d) => s + d.net + d.fee, 0);
+
+      // Retry once : si une jambe a échoué sur "fonds insuffisants" (solde bougé
+      // entre lecture et ordre) et qu'il reste un montant significatif, on relit
+      // les VRAIS soldes (bypass cache) et on reconstruit les jambes du reliquat.
+      if (shortfall >= MIN_SELL_EUR && errors.some(e => /insufficient funds/i.test(e))) {
+        console.warn(`[LiveTrader] Retry vente ${decision.symbol} (${shortfall.toFixed(2)}€ restants) après re-lecture`);
+        clearKrakenBalanceCache();
+        clearCoinbaseBalanceCache();
+        const fresh = await readSellHoldings(decision.symbol, true);
+        const rb = buildSellLegs(decision.symbol, currentPrice.price_eur, shortfall,
+          fresh.krakenPair, fresh.coinbaseProduct, fresh.kraken, fresh.coinbase);
+        dropped.push(...rb.dropped.map(d => `retry: ${d}`));
+        if (rb.legs.length > 0) {
+          const r2 = await execSellLegs(decision.symbol, price, eurUsdRate,
+            decision.reasoning, decision.confidence, rb.legs);
+          done = [...done, ...r2.done];
+          errors.push(...r2.errors);
+          txid = txid ?? r2.txid;
+          shortfall = targetEur - done.reduce((s, d) => s + d.net + d.fee, 0);
         }
       }
 
@@ -372,8 +467,6 @@ export async function executeLiveTrade(
       const netKraken = done.filter(d => d.exchange === 'kraken').reduce((s, d) => s + d.net, 0);
       const netCoinbase = done.filter(d => d.exchange === 'coinbase').reduce((s, d) => s + d.net, 0);
       const soldCrypto = done.reduce((s, d) => s + d.crypto, 0);
-      const soldGross = done.reduce((s, d) => s + d.net + d.fee, 0);
-      const shortfall = targetEur - soldGross;
       const where = [...new Set(done.map(d => d.exchange))].join(' + ');
       const dominant = netKraken >= netCoinbase ? 'kraken' as const : 'coinbase' as const;
 

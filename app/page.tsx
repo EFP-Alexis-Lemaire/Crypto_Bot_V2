@@ -21,6 +21,7 @@ import CycleHistory from '@/components/CycleHistory';
 import CashoutPanel from '@/components/CashoutPanel';
 import MorningReport from '@/components/MorningReport';
 import HealthStrip from '@/components/HealthStrip';
+import ProtectionPanel, { ProtectionStatus } from '@/components/ProtectionPanel';
 import ExchangeBalances from '@/components/ExchangeBalances';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
@@ -108,6 +109,7 @@ export default function Dashboard() {
   perfPeriodRef.current = perfPeriod;
 
   const [health, setHealth] = useState<React.ComponentProps<typeof HealthStrip>['health']>(null);
+  const [protection, setProtection] = useState<ProtectionStatus[]>([]);
   const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
     // Default to PROD when running on production Vercel deployment
     if (typeof window !== 'undefined') {
@@ -154,7 +156,7 @@ export default function Dashboard() {
   const fetchAll = useCallback(async () => {
     const dbHeaders = { 'x-db-context': dbContext };
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, healthRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, healthRes, protectionRes] =
         await Promise.all([
           fetch('/api/portfolio', { headers: dbHeaders }),
           fetch('/api/decisions?limit=20', { headers: dbHeaders }),
@@ -165,6 +167,7 @@ export default function Dashboard() {
           fetch('/api/morning-report', { headers: dbHeaders }),
           fetch('/api/ai-costs', { headers: dbHeaders }),
           fetch('/api/health', { headers: dbHeaders }),
+          fetch('/api/protection', { headers: dbHeaders }),
         ]);
       await fetchPerformance(perfPeriodRef.current);
 
@@ -214,6 +217,11 @@ export default function Dashboard() {
 
       if (healthRes.ok) {
         setHealth(await healthRes.json());
+      }
+
+      if (protectionRes.ok) {
+        const data = await protectionRes.json();
+        setProtection(data.positions ?? []);
       }
 
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
@@ -593,6 +601,9 @@ export default function Dashboard() {
               </div>
               );
             })()}
+
+            {/* Protections : stops armés ? à quelle distance ? */}
+            <ProtectionPanel positions={protection} />
 
             {/* Actifs sur exchanges — PROD only */}
             {dbContext === 'prod' && <ExchangeBalances />}
