@@ -31,12 +31,12 @@ export default function ProtectionPanel({ positions }: Props) {
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-        <h3 className="text-white font-semibold flex items-center gap-2 text-sm">
-          <ShieldCheck className="w-4 h-4 text-green-400" />
-          Protections (stops armés ?)
+      <div className="flex items-center justify-between flex-wrap gap-2 px-4 py-3 border-b border-gray-800">
+        <h3 className="text-white font-semibold flex items-center gap-2 text-sm whitespace-nowrap">
+          <ShieldCheck className="w-4 h-4 text-green-400 flex-shrink-0" />
+          Protections
         </h3>
-        <span className="text-xs text-gray-500">
+        <span className="text-xs text-gray-500 text-right">
           {hits > 0 ? (
             <span className="text-red-400 font-semibold">{hits} stop{hits > 1 ? 's' : ''} touché{hits > 1 ? 's' : ''} → vente au prochain passage</span>
           ) : near > 0 ? (
@@ -47,15 +47,15 @@ export default function ProtectionPanel({ positions }: Props) {
         </span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full min-w-[540px] text-sm">
           <thead>
             <tr className="text-gray-500 border-b border-gray-800 text-xs">
-              <th className="text-left py-2.5 px-4">Crypto</th>
-              <th className="text-right py-2.5 px-4">P&L</th>
-              <th className="text-right py-2.5 px-4">Stop dyn</th>
-              <th className="text-right py-2.5 px-4">Marge</th>
+              <th className="text-left py-2.5 px-4 whitespace-nowrap">Crypto</th>
+              <th className="text-right py-2.5 px-4 whitespace-nowrap">P&L</th>
+              <th className="text-right py-2.5 px-4 whitespace-nowrap">Stop dyn</th>
+              <th className="text-right py-2.5 px-4 whitespace-nowrap">Marge</th>
               <th className="text-right py-2.5 px-4 hidden sm:table-cell">TP / Suivi</th>
-              <th className="text-right py-2.5 px-4">État</th>
+              <th className="text-right py-2.5 px-4 whitespace-nowrap">État</th>
             </tr>
           </thead>
           <tbody>
@@ -77,8 +77,8 @@ export default function ProtectionPanel({ positions }: Props) {
                     {p.trailing_dd_pts !== null && p.trailing_high_eur !== null ? ` · trail ${p.trailing_dd_pts.toFixed(1)}%` : ''}
                   </td>
                   <td className="py-2.5 px-4 text-right">
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border ${meta.cls}`}>
-                      <Icon className="w-3 h-3" />
+                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border whitespace-nowrap ${meta.cls}`}>
+                      <Icon className="w-3 h-3 flex-shrink-0" />
                       {meta.label}
                     </span>
                   </td>

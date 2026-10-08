@@ -145,9 +145,12 @@ export default function ExchangeBalances() {
           </div>
         </div>
 
-        {/* Balances list — poussières (< 1€ valorisé) masquées, totaux inchangés */}
+        {/* Balances list — poussières masquées (< 1€ valorisé, ou sans prix et < 1 unité), totaux inchangés */}
         {(() => {
-          const visible = data.balances.filter(b => b.value_eur === null || b.value_eur >= 1);
+          const isDust = (b: { value_eur: number | null; amount: number }) =>
+            (b.value_eur !== null && b.value_eur < 1) ||
+            (b.value_eur === null && b.amount < 1);
+          const visible = data.balances.filter(b => !isDust(b));
           const dustCount = data.balances.length - visible.length;
           if (visible.length === 0) {
             return (
@@ -206,7 +209,7 @@ export default function ExchangeBalances() {
             })}
             {dustCount > 0 && (
               <p className="text-gray-600 text-xs px-1 pt-1">
-                {dustCount} poussière{dustCount > 1 ? 's' : ''} (&lt; 1€) masquée{dustCount > 1 ? 's' : ''} — incluse{dustCount > 1 ? 's' : ''} dans les totaux
+                {dustCount} poussière{dustCount > 1 ? 's' : ''} (&lt; 1€ ou sans prix) masquée{dustCount > 1 ? 's' : ''} — incluse{dustCount > 1 ? 's' : ''} dans les totaux
               </p>
             )}
           </div>

@@ -102,7 +102,7 @@ export default function Dashboard() {
   const [aiCosts, setAiCosts] = useState<Record<string, unknown> | null>(null);
   const [performance, setPerformance] = useState<SymbolPerformance[]>([]);
   const [perfTotals, setPerfTotals] = useState<{ realized_eur: number; unrealized_eur: number; fees_eur: number } | null>(null);
-  const [perfPeriod, setPerfPeriod] = useState('all');
+  const [perfPeriod, setPerfPeriod] = useState('1d');
   const [perfDegraded, setPerfDegraded] = useState(false);
   // Miroir ref : fetchAll garde la période sans en dépendre (pas de refetch global)
   const perfPeriodRef = useRef(perfPeriod);
