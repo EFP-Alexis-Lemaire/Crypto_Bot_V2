@@ -28,6 +28,8 @@ import { getDrawdownReview } from '@/lib/memory';
 import { runScheduledDca } from '@/lib/dca';
 import { sendTelegramMessage } from '@/lib/telegram';
 import { acquireCycleLock, releaseCycleLock } from '@/lib/cycle-lock';
+import { readDailyPlan, adaptiveStance } from '@/lib/daily-plan';
+import { quickBacktest } from '@/lib/backtest';
 import { sendTradeAlert } from '@/lib/telegram';
 import { TechnicalIndicators, BotDecision, sectorOf, MAX_BUYS_PER_SECTOR_PER_CYCLE, DIP_DRAWDOWN_PCT, DIP_FEAR_GREED_MAX, RISK_CONFIGS, MAJOR_SYMBOLS, DIP_MAX_POSITION_PCT } from '@/lib/types';
 import { cronUnauthorized } from '@/lib/cron-auth';
@@ -329,6 +331,39 @@ export async function GET(request: Request) {
       console.log(`[Bot Cycle ${cycleId}] Drawdown 3j: ${drawdownReview.dd_pct}% (${drawdownReview.dd_eur}€) — revue injectée`);
     }
 
+    // Plan du jour (écrit par le daily report 7h) : stance + contexte injectés
+    const dailyPlan = await readDailyPlan(db);
+    const planStance = dailyPlan?.stance ?? 'selective';
+
+    // Posture adaptative : crash en cours de journée → defensive immédiat
+    const dd24 = await getDrawdown24h(dbContext, currentEnv);
+    const stance = adaptiveStance(planStance, dd24);
+    if (stance !== planStance) {
+      console.log(`[Bot Cycle ${cycleId}] Posture adaptative: ${planStance} → ${stance} (drawdown 24h: ${dd24?.toFixed(2)}%)`);
+    }
+
+    // Backtest rapide sur les top candidats (5 max, 1 appel historique chacun)
+    const backtestScores: Record<string, number> = {};
+    const topForBt = allMarketData.slice(0, 5);
+    await Promise.all(
+      topForBt.map(async m => {
+        try {
+          const coinId = SYMBOL_TO_COINGECKO_ID[m.symbol] ?? m.symbol.toLowerCase();
+          const tech = technicalIndicators.find(t => t.symbol === m.symbol);
+          if (!tech) return;
+          const bt = await quickBacktest(coinId, {
+            rsi: tech.rsi_14 ?? 50,
+            roc30: tech.roc_30d ?? 0,
+            vol: tech.volatility_pct ?? 0,
+            bbWidth: tech.bb_width_pct ?? 0,
+            fearGreed: fearGreed.value,
+            trend: tech.trend,
+          }, fearGreed.value);
+          if (bt) backtestScores[m.symbol] = bt.score;
+        } catch { /* backtest non-bloquant */ }
+      })
+    );
+
     // AI Analysis — en live on transmet le cash PAR exchange pour que l'IA
     // dimensionne chaque ordre au cash d'un seul exchange (pas au total consolidé)
     console.log(`[Bot Cycle ${cycleId}] Running AI analysis...`);
@@ -359,6 +394,8 @@ export async function GET(request: Request) {
       dbContext,
       marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance, dip_mode: dipMode, btc_drawdown_30d: btcDrawdown },
       drawdownReview,
+      dailyPlan: dailyPlan ? { stance, summary: dailyPlan.summary, expected_actions: dailyPlan.expected_actions } : null,
+      backtestScores,
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle

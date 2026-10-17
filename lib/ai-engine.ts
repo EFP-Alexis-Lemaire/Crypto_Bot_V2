@@ -12,6 +12,7 @@ import {
   DIP_MAX_POSITION_PCT,
   MIN_CASH_RESERVE_PCT,
 } from './types';
+import { STANCE_RULES } from './daily-plan';
 import { logAICost } from './ai-costs';
 import { getDefiTVL } from './market-data';
 import { getBotMemory, formatMemoryForPrompt, DrawdownReview } from './memory';
@@ -56,6 +57,14 @@ interface AnalysisContext {
   };
   // Revue des pertes 3j (null si pas de pertes significatives) : journal anti-récidive
   drawdownReview?: DrawdownReview | null;
+  // Plan du jour (écrit par le daily report) : stance contraignante + contexte
+  dailyPlan?: {
+    stance: 'defensive' | 'selective' | 'opportunistic' | 'aggressive';
+    summary: string;
+    expected_actions: string[];
+  } | null;
+  // Backtest rapide par symbole (score 0-100, > 50 = setup favorable historiquement)
+  backtestScores?: Record<string, number>;
 }
 
 export async function analyzeMarketWithAI(
@@ -218,6 +227,35 @@ export async function analyzeMarketWithAI(
           return d.confidence >= riskConfig.min_confidence;
         }
         return true;
+      })
+      // --- Garde-fous du PLAN DU JOUR (écrit par le daily report) ---
+      // La stance est CONTRAIGNANTE : min confidence, taille, small-caps.
+      // Le backtest rapide rejette les setups qui ont perdu historiquement.
+      .map((d: BotDecision) => {
+        if (d.action !== 'BUY' || !context.dailyPlan) return d;
+        const stance = STANCE_RULES[context.dailyPlan.stance];
+        // 1. Confiance minimale de la stance (ex: defensive = 80%)
+        if (d.confidence < stance.minConfidence) {
+          return { ...d, action: 'SKIP' as const, reasoning: `Stance ${stance.label} : confiance ${d.confidence}% < ${stance.minConfidence}%. ${d.reasoning}` };
+        }
+        // 2. Taille ajustée (defensive = -50%, aggressive = +25%)
+        if (stance.sizeMultiplier !== 1) {
+          d.amount_eur = parseFloat((d.amount_eur * stance.sizeMultiplier).toFixed(2));
+        }
+        // 3. Small-caps interdits en defensive/selective
+        if (!stance.allowSmallCaps && !MAJOR_SYMBOLS.includes(d.symbol)) {
+          return { ...d, action: 'SKIP' as const, reasoning: `Stance ${stance.label} : small-caps interdits. ${d.reasoning}` };
+        }
+        // 4. Backtest : setup perdant historiquement (< 45) = SKIP
+        const bt = context.backtestScores?.[d.symbol];
+        if (bt !== undefined && bt < 45) {
+          return { ...d, action: 'SKIP' as const, reasoning: `Backtest 7j défavorable (${bt}/100, winrate historique faible). ${d.reasoning}` };
+        }
+        return d;
+      })
+      .filter((d: BotDecision) => {
+        // Un BUY skipé par la stance/backtest ne compte plus comme action
+        return d.action !== 'SKIP';
       });
 
     // Enforce max trades limit
@@ -243,11 +281,19 @@ function buildScreeningPrompt(context: AnalysisContext): string {
     .map(n => `[${n.sentiment.toUpperCase()}] ${n.title}`)
     .join('\n');
 
+  const planLine = context.dailyPlan
+    ? `\nPLAN DU JOUR (posture ${STANCE_RULES[context.dailyPlan.stance].label}) : ${context.dailyPlan.summary}\nActions attendues : ${context.dailyPlan.expected_actions.join(' | ')}`
+    : '';
+  const btLine = context.backtestScores && Object.keys(context.backtestScores).length > 0
+    ? `\nBACKTEST 7J (score 0-100, < 45 = setup perdant historiquement) : ${Object.entries(context.backtestScores).map(([s, v]) => `${s}:${v}`).join(', ')}`
+    : '';
+
   return `
 Analyse rapide du marché crypto pour identifier les 3-5 meilleures opportunités de trading.
 
 FEAR & GREED INDEX: ${context.fearGreedIndex.value}/100 (${context.fearGreedIndex.label})
 TAUX EUR/USD: ${context.eurUsdRate}
+${planLine}${btLine}
 
 DONNÉES MARCHÉ:
 ${marketSummary}

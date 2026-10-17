@@ -22,6 +22,7 @@ import CashoutPanel from '@/components/CashoutPanel';
 import MorningReport from '@/components/MorningReport';
 import HealthStrip from '@/components/HealthStrip';
 import ProtectionPanel, { ProtectionStatus } from '@/components/ProtectionPanel';
+import { Map } from 'lucide-react';
 import ExchangeBalances from '@/components/ExchangeBalances';
 import { PortfolioSummary, MarketData } from '@/lib/types';
 
@@ -110,6 +111,14 @@ export default function Dashboard() {
 
   const [health, setHealth] = useState<React.ComponentProps<typeof HealthStrip>['health']>(null);
   const [protection, setProtection] = useState<ProtectionStatus[]>([]);
+  const [dailyPlan, setDailyPlan] = useState<{
+    stance: string;
+    summary: string;
+    expected_actions: string[];
+    watchlist: string[];
+    risks: string[];
+    retro: string;
+  } | null>(null);
   const [dbContext, setDbContext] = useState<'uat' | 'prod'>(() => {
     // Default to PROD when running on production Vercel deployment
     if (typeof window !== 'undefined') {
@@ -156,7 +165,7 @@ export default function Dashboard() {
   const fetchAll = useCallback(async () => {
     const dbHeaders = { 'x-db-context': dbContext };
     try {
-      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, healthRes, protectionRes] =
+      const [portfolioRes, decisionsRes, tradesRes, marketRes, configRes, cyclesRes, morningRes, aiCostsRes, healthRes, protectionRes, dailyPlanRes] =
         await Promise.all([
           fetch('/api/portfolio', { headers: dbHeaders }),
           fetch('/api/decisions?limit=20', { headers: dbHeaders }),
@@ -168,6 +177,7 @@ export default function Dashboard() {
           fetch('/api/ai-costs', { headers: dbHeaders }),
           fetch('/api/health', { headers: dbHeaders }),
           fetch('/api/protection', { headers: dbHeaders }),
+          fetch('/api/cron/daily-plan', { headers: dbHeaders }),
         ]);
       await fetchPerformance(perfPeriodRef.current);
 
@@ -222,6 +232,12 @@ export default function Dashboard() {
       if (protectionRes.ok) {
         const data = await protectionRes.json();
         setProtection(data.positions ?? []);
+      }
+
+      if (dailyPlanRes.ok) {
+        const data = await dailyPlanRes.json();
+        if (data.plan) setDailyPlan(data.plan);
+        else setDailyPlan(null);
       }
 
       setLastUpdated(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
@@ -384,6 +400,36 @@ export default function Dashboard() {
               report={morningReport as Parameters<typeof MorningReport>[0]['report']}
               onRefresh={fetchAll}
             />
+
+            {/* Plan du jour (stance + prévision, appliqués par les cycles) */}
+            {dailyPlan && (
+              <div className="bg-gray-900 border border-indigo-500/20 rounded-xl p-4">
+                <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                  <h3 className="text-white font-semibold flex items-center gap-2 text-sm">
+                    <Map className="w-4 h-4 text-indigo-400" />
+                    Plan du jour
+                  </h3>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
+                    dailyPlan.stance === 'defensive' ? 'bg-red-500/15 text-red-400'
+                    : dailyPlan.stance === 'selective' ? 'bg-yellow-500/15 text-yellow-400'
+                    : dailyPlan.stance === 'opportunistic' ? 'bg-blue-500/15 text-blue-400'
+                    : 'bg-green-500/15 text-green-400'
+                  }`}>
+                    {dailyPlan.stance.toUpperCase()}
+                  </span>
+                </div>
+                <p className="text-gray-300 text-sm leading-relaxed mb-2">{dailyPlan.summary}</p>
+                {dailyPlan.expected_actions.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {dailyPlan.expected_actions.map((a, i) => (
+                      <span key={i} className="text-xs bg-gray-800 text-gray-300 px-2 py-1 rounded-lg">
+                        {a}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Santé des connexions */}
             <HealthStrip health={health} />

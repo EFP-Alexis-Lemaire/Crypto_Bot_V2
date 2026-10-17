@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro, Bell, BellOff, CalendarClock, OctagonX } from 'lucide-react';
+import { Play, Pause, Settings, RefreshCw, Send, Shield, TrendingUp, Zap, Euro, Bell, BellOff, CalendarClock, OctagonX, Map } from 'lucide-react';
 
 interface Config {
   risk_level: string;
@@ -226,6 +226,30 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     }
   };
 
+  // Génère (ou régénère) le plan du jour — les cycles suivants l'appliquent
+  const triggerPlan = async () => {
+    setLoading(true);
+    setMessage('Génération du plan du jour...');
+    try {
+      const res = await fetch('/api/cron/daily-plan', {
+        method: 'POST',
+        headers: { 'x-db-context': dbContext },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setMessage(`Erreur: ${data.error ?? data.details ?? 'inconnue'}`);
+      } else {
+        setMessage(`Plan du jour: ${data.plan?.stance ?? '?'} — appliqué aux prochains cycles`);
+        onConfigChange();
+      }
+    } catch {
+      setMessage('Erreur réseau');
+    } finally {
+      setLoading(false);
+      setTimeout(() => setMessage(''), 5000);
+    }
+  };
+
   const saveCapital = async () => {
     const val = parseFloat(capitalInput);
     if (isNaN(val) || val <= 0) return;
@@ -314,6 +338,16 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
             Rapport
           </button>
         </div>
+
+        <button
+          onClick={triggerPlan}
+          disabled={loading}
+          className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 border border-indigo-500/20 disabled:opacity-40 transition-all"
+          title="Génère le plan du jour (rétro + prévision) — les cycles suivants l'appliquent"
+        >
+          <Map className="w-4 h-4" />
+          Plan du jour
+        </button>
 
         {/* Feedback */}
         {message && (
