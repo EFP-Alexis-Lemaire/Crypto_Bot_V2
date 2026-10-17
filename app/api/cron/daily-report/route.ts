@@ -6,6 +6,7 @@ import { sendDailyReport } from '@/lib/telegram';
 import { BotDecision } from '@/lib/types';
 import { cronUnauthorized } from '@/lib/cron-auth';
 import { WATCHLIST_COINS } from '@/lib/market-data';
+import { buildDailyInsights } from '@/lib/daily-insights';
 
 export const maxDuration = 30;
 
@@ -81,6 +82,9 @@ export async function GET(request: Request) {
         ? '🟢 Marché euphorique modéré — prendre des profits progressifs'
         : '⚠️ Marché en euphorie extrême — risque de correction élevé';
 
+    // Analyse IA : rétro 24h (erreurs comprises) + prévision du jour
+    const insights = await buildDailyInsights(dbContext, env);
+
     await sendDailyReport(
       portfolio,
       decisions,
@@ -88,7 +92,8 @@ export async function GET(request: Request) {
       fearGreed,
       marketSentiment,
       isLive,
-      dbContext
+      dbContext,
+      insights
     );
 
     return NextResponse.json({

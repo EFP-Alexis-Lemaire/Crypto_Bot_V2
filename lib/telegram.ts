@@ -47,6 +47,13 @@ export async function sendTelegramMessage(message: string, isLiveMode?: boolean,
   }
 }
 
+const STANCE_META: Record<string, { emoji: string; label: string }> = {
+  defensive: { emoji: '🛡️', label: 'DÉFENSIF' },
+  selective: { emoji: '🎯', label: 'SÉLECTIF' },
+  opportunistic: { emoji: '⚡', label: 'OPPORTUNISTE' },
+  aggressive: { emoji: '🚀', label: 'AGRESSIF' },
+};
+
 export async function sendDailyReport(
   portfolio: PortfolioSummary,
   decisions: BotDecision[],
@@ -54,7 +61,9 @@ export async function sendDailyReport(
   fearGreed: { value: number; label: string },
   marketSentiment: string,
   isLiveMode?: boolean,
-  ctx?: DbContext
+  ctx?: DbContext,
+  // Analyse IA du jour : rétro 24h + prévision (optionnel pour compat)
+  insights?: import('./daily-insights').DailyInsights
 ): Promise<void> {
   const now = new Date();
   const dateStr = format(now, "EEEE d MMMM yyyy", { locale: fr });
@@ -99,6 +108,56 @@ export async function sendDailyReport(
       ? '😊'
       : '🤑';
 
+  // --- Sections IA (rétro + plan) ---
+  let retroSection = '';
+  let planSection = '';
+  if (insights) {
+    const r = insights.retro;
+    const tradesLines = r.trades.length > 0
+      ? r.trades.map(t => {
+          const emoji = t.action === 'BUY' ? '🟢' : '🔴';
+          const realized = t.realized_eur !== null
+            ? ` → réalisé ${t.realized_eur >= 0 ? '+' : ''}${t.realized_eur.toFixed(2)}€`
+            : '';
+          return `  ${emoji} ${t.action} ${t.symbol} ${t.amount_eur.toFixed(0)}€${realized}`;
+        }).join('\n')
+      : '  ⏸ Aucun trade';
+
+    const lossLine = r.loss_review
+      ? `\n  ⚠️ Pertes 3j : ${r.loss_review.dd_pct.toFixed(2)}% (${r.loss_review.dd_eur.toFixed(2)}€)\n  💡 ${r.loss_review.lessons[0] ?? ''}`
+      : '';
+
+    retroSection = `
+🔙 <b>HIER — CE QUE LE BOT A FAIT</b>
+${tradesLines}
+  Réalisé net: ${r.realized_total_eur >= 0 ? '+' : ''}${r.realized_total_eur.toFixed(2)}€ | Frais: ${r.fees_eur.toFixed(2)}€${lossLine}`;
+
+    const stance = STANCE_META[insights.plan.stance] ?? STANCE_META.selective;
+    const actionsLines = insights.plan.expected_actions.length > 0
+      ? insights.plan.expected_actions.map(a => `  • ${a}`).join('\n')
+      : '  • Attendre un signal clair';
+    const watchLines = insights.plan.watchlist.length > 0
+      ? insights.plan.watchlist.map(w => `  • ${w}`).join('\n')
+      : '  • —';
+    const riskLines = insights.plan.risks.length > 0
+      ? insights.plan.risks.map(rk => `  • ${rk}`).join('\n')
+      : '  • —';
+
+    planSection = `
+🔮 <b>AUJOURD'HUI — CE QUE LE BOT VA FAIRE</b>
+  ${stance.emoji} Posture: <b>${stance.label}</b>
+  ${insights.plan.summary}
+
+  📋 <b>Actions attendues</b>
+${actionsLines}
+
+  👀 <b>Surveillance</b>
+${watchLines}
+
+  ⚠️ <b>Risques</b>
+${riskLines}`;
+  }
+
   const message = `
 🤖 <b>RAPPORT JOURNALIER — ${dateStr}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -114,9 +173,8 @@ ${holdingsText}
 🌡️ <b>SENTIMENT MARCHÉ</b>
   Fear & Greed: ${fearEmoji} ${fearGreed.value}/100 (${fearGreed.label})
   ${marketSentiment}
-
-🔄 <b>DÉCISIONS D'AUJOURD'HUI</b> (${tradesCount} trade${tradesCount > 1 ? 's' : ''})
-${decisionsText}
+${retroSection}
+${planSection}
 
 ━━━━━━━━━━━━━━━━━━━━
 Mode: ${(isLiveMode ?? process.env.TRADING_MODE === 'live') ? '🔴 LIVE TRADING (Réel)' : '📝 PAPER TRADING (Fictif)'}

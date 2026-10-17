@@ -5,6 +5,7 @@ import { getPortfolioSummary } from '@/lib/portfolio';
 import { sendDailyReport } from '@/lib/telegram';
 import { BotDecision } from '@/lib/types';
 import { WATCHLIST_COINS } from '@/lib/market-data';
+import { buildDailyInsights } from '@/lib/daily-insights';
 
 export const maxDuration = 30;
 
@@ -57,7 +58,8 @@ export async function POST(request: Request) {
       fg.value < 75 ? '🟢 Marché euphorique modéré — prendre des profits progressifs' :
       '⚠️ Marché en euphorie extrême — risque de correction élevé';
 
-    await sendDailyReport(portfolio, decisions, todayTrades.length, fg, marketSentiment, isLive, ctx);
+    const insights = await buildDailyInsights(ctx, env);
+    await sendDailyReport(portfolio, decisions, todayTrades.length, fg, marketSentiment, isLive, ctx, insights);
 
     return NextResponse.json({ success: true, trades_today: todayTrades.length, ctx, env });
   } catch (error) {
