@@ -45,6 +45,9 @@ export async function GET(request: Request) {
       total_value_eur: Number(portfolio.total_value_eur.toFixed(2)),
       pnl_eur: Number(portfolio.pnl_eur.toFixed(2)),
       pnl_percent: Number(portfolio.pnl_percent.toFixed(2)),
+      ...(portfolio.net_contributions_eur !== undefined
+        ? { net_contributions_eur: Number(portfolio.net_contributions_eur.toFixed(2)), pnl_basis: portfolio.pnl_basis }
+        : {}),
       env,
       ...(topPerformers ? { top_performers: topPerformers } : {}),
       updated_at: new Date().toISOString(),
