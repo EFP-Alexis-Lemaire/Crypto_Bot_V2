@@ -72,6 +72,15 @@ export async function analyzeMarketWithAI(
 ): Promise<BotDecision[]> {
   const riskConfig = RISK_CONFIGS[context.riskLevel];
 
+  // Garde-fou données : sans un seul indicateur technique (historique
+  // CoinGecko indisponible / quota épuisé), on ne trade PAS. Décider sur les
+  // seuls prix 24h/7d, c'est du hasard — et l'IA surestime sa confiance
+  // quand le prompt n'a aucune donnée technique.
+  if (context.technicalIndicators.length === 0) {
+    console.warn('[AI] Aucun indicateur technique disponible — aucun trade sur ce cycle (données marché incomplètes)');
+    return [];
+  }
+
   // Load bot memory in parallel with screening — mémoire du CONTEXTE
   // (UAT et PROD apprennent séparément, sans mélange)
   const memory = await getBotMemory(context.dbContext ?? 'uat');
@@ -99,7 +108,7 @@ export async function analyzeMarketWithAI(
 
     // Log AI cost
     if (screeningResponse.usage) {
-      await logAICost('gpt-4o-mini', screeningResponse.usage, context.eurUsdRate, undefined, 'screening');
+      await logAICost('gpt-4o-mini', screeningResponse.usage, context.eurUsdRate, undefined, 'screening', context.dbContext ?? 'uat');
     }
   } catch (error) {
     console.error('Screening error:', error);
@@ -143,7 +152,7 @@ export async function analyzeMarketWithAI(
 
     // Log AI cost
     if (decisionResponse.usage) {
-      await logAICost('gpt-4o', decisionResponse.usage, context.eurUsdRate, undefined, 'decision');
+      await logAICost('gpt-4o', decisionResponse.usage, context.eurUsdRate, undefined, 'decision', context.dbContext ?? 'uat');
     }
   } catch (error) {
     console.error('Decision error:', error);

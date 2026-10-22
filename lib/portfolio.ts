@@ -1,6 +1,7 @@
 import { sql, sqlForContext, DbContext } from './db';
 import { PortfolioSummary, PortfolioHolding, BotDecision, MarketData, dynamicStopPct } from './types';
 import { getCurrentEnv, TradingEnv } from './env';
+import { getNetContributions } from './cash-flows';
 
 type Row = Record<string, unknown>;
 
@@ -145,8 +146,19 @@ export async function getPortfolioSummary(
     ? parseFloat(str(initialConfigRows[0], 'value'))
     : parseFloat(process.env.INITIAL_PORTFOLIO_EUR ?? '5000');
 
-  const pnl_eur = total_value_eur - initial;
-  const pnl_percent = initial > 0 ? (pnl_eur / initial) * 100 : 0;
+  // Référence du P&L : en live, capital réellement versé (référence + dépôts
+  // postérieurs - retraits), pas une constante de config qui ignore les
+  // versements (sinon un dépôt apparaît comme un gain). En paper : config.
+  let costBasis = initial;
+  let pnlBasis: 'flows' | 'config' = 'config';
+  if (env === 'live') {
+    const contributions = await getNetContributions(db, env, initial);
+    costBasis = contributions.total;
+    pnlBasis = contributions.basis;
+  }
+
+  const pnl_eur = total_value_eur - costBasis;
+  const pnl_percent = costBasis > 0 ? (pnl_eur / costBasis) * 100 : 0;
 
   return {
     total_value_eur,
@@ -155,7 +167,13 @@ export async function getPortfolioSummary(
     pnl_eur,
     pnl_percent,
     holdings: holdingDetails.filter(h => h.amount > 0),
-    ...(env === 'live' ? { cash_by_exchange: { kraken: cashKraken, coinbase: cashCoinbase } } : {}),
+    ...(env === 'live'
+      ? {
+          cash_by_exchange: { kraken: cashKraken, coinbase: cashCoinbase },
+          net_contributions_eur: costBasis,
+          pnl_basis: pnlBasis,
+        }
+      : {}),
   };
 }
 

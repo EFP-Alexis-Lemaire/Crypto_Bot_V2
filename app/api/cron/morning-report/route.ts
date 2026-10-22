@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
-import { sqlForContext, DbContext } from '@/lib/db';
-import { getMarketData, getFearGreedIndex, getEurUsdRate, getCryptoNews } from '@/lib/market-data';
+import { sqlForContext, resolveDbContext, DbContext } from '@/lib/db';
+import { getFearGreedIndex, getEurUsdRate, getCryptoNews } from '@/lib/market-data';
+import { resolveMarketState } from '@/lib/market-service';
 import { getPortfolioSummary } from '@/lib/portfolio';
 import { WATCHLIST_COINS } from '@/lib/market-data';
 import { sendTelegramMessage } from '@/lib/telegram';
@@ -37,7 +38,8 @@ async function generateMorningReport(
   fearGreed: { value: number; label: string },
   eurUsd: number,
   news: { title: string; sentiment: string }[],
-  portfolio: { total_value_eur: number; pnl_eur: number; pnl_percent: number }
+  portfolio: { total_value_eur: number; pnl_eur: number; pnl_percent: number },
+  dbContext: DbContext
 ): Promise<MarketReport> {
   const topMovers = [...marketData]
     .sort((a, b) => Math.abs(b.change_24h) - Math.abs(a.change_24h))
@@ -100,7 +102,7 @@ Génère un rapport JSON structuré et précis:
 
   // Log AI cost
   if (response.usage) {
-    await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'morning-report');
+    await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'morning-report', dbContext);
   }
 
   const parsed = JSON.parse(response.choices[0].message.content ?? '{}');
@@ -137,14 +139,8 @@ export async function GET(request: Request) {
   const unauthorized = authorizedByQuery ? null : cronUnauthorized(request);
   if (unauthorized) return unauthorized;
 
-  // Contexte DB : ?ctx=prod (ou ?db=) > header x-db-context > APP_ENV, défaut UAT
-  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
-  const headerCtx = request.headers.get('x-db-context');
-  const dbContext: DbContext = (queryCtx === 'prod' || queryCtx === 'uat')
-    ? queryCtx
-    : (headerCtx === 'prod' || headerCtx === 'uat')
-      ? headerCtx
-      : process.env.APP_ENV === 'production' ? 'prod' : 'uat';
+  // Contexte DB : ?ctx=prod (ou ?db=) > header x-db-context > production => PROD
+  const dbContext = resolveDbContext(request);
   const db = sqlForContext(dbContext);
 
   try {
@@ -152,16 +148,20 @@ export async function GET(request: Request) {
     const isLive = modeRows[0]?.value === 'live';
     const env = isLive ? 'live' : 'paper';
 
-    const [marketData, fearGreedRaw, eurUsd, news] = await Promise.all([
-      getMarketData(WATCHLIST_COINS),
+    const [marketState, fearGreedRaw, eurUsd, news] = await Promise.all([
+      resolveMarketState(dbContext, WATCHLIST_COINS),
       getFearGreedIndex(),
       getEurUsdRate(),
       getCryptoNews(),
     ]);
+    const marketData = marketState.data;
     const fearGreed = fearGreedRaw as { value: number; label: string };
+    if (!marketState.fresh) {
+      console.warn(`[MorningReport] Données marché périmées (${marketState.ageMinutes ?? '?'} min) — rapport sur snapshot`);
+    }
 
     const portfolio = await getPortfolioSummary(marketData, env, dbContext);
-    const report = await generateMorningReport(marketData, fearGreed, eurUsd, news, portfolio);
+    const report = await generateMorningReport(marketData, fearGreed, eurUsd, news, portfolio, dbContext);
 
     // Save to DB
     await db`

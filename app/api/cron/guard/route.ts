@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
-import { sqlForContext, DbContext } from '@/lib/db';
+import { sqlForContext, resolveDbContext } from '@/lib/db';
 import {
-  getMarketData,
   getCoinHistory,
   calculateVolatilityPct,
   WATCHLIST_COINS,
   SYMBOL_TO_COINGECKO_ID,
 } from '@/lib/market-data';
+import { resolveMarketState } from '@/lib/market-service';
 import {
   getPortfolioSummary,
   checkStopLossAndTakeProfit,
@@ -33,13 +33,7 @@ export async function GET(request: Request) {
   const unauthorized = authorizedByQuery ? null : cronUnauthorized(request);
   if (unauthorized) return unauthorized;
 
-  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
-  const headerCtx = request.headers.get('x-db-context');
-  const dbContext: DbContext = (queryCtx === 'prod' || queryCtx === 'uat')
-    ? queryCtx
-    : (headerCtx === 'prod' || headerCtx === 'uat')
-      ? headerCtx
-      : process.env.APP_ENV === 'production' ? 'prod' : 'uat';
+  const dbContext = resolveDbContext(request);
   const db = sqlForContext(dbContext);
   const cycleId = `guard-${Date.now()}`;
 
@@ -59,7 +53,16 @@ export async function GET(request: Request) {
       return NextResponse.json({ message: 'Bot en pause', ctx: dbContext });
     }
 
-    const marketData = await getMarketData(WATCHLIST_COINS);
+    // Prix frais obligatoires : un stop calculé sur un prix périmé est un
+    // stop faux (on ne vendrait pas au bon moment, ou on vendrait trop tôt).
+    const marketState = await resolveMarketState(dbContext, WATCHLIST_COINS);
+    if (!marketState.fresh) {
+      const message = `Données marché indisponibles (${marketState.error ?? 'cause inconnue'}) — guardian ignoré.`;
+      console.warn(`[Guard ${cycleId}] ${message}`);
+      await releaseCycleLock(db);
+      return NextResponse.json({ message, skipped: true, ctx: dbContext, market_error: marketState.error });
+    }
+    const marketData = marketState.data;
     const eurUsdRate = 1.08; // fixe approx : le guardian n'a pas besoin du taux exact
     const portfolio = await getPortfolioSummary(marketData, env, dbContext);
 

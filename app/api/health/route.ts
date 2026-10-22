@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { sqlForContext, getDbContext } from '@/lib/db';
-import { getFearGreedIndex } from '@/lib/market-data';
+import { getCoinGeckoStatus, getMarketData, WATCHLIST_COINS } from '@/lib/market-data';
 
 type Row = Record<string, unknown>;
 
@@ -44,7 +44,10 @@ export async function GET(request: Request) {
       await getCoinbaseBalance();
     }),
     timed(async () => {
-      await getFearGreedIndex();
+      // On teste le VRAI endpoint marché (celui qui cassait) : Fear&Greed
+      // passait même quand /coins/markets était en 429 quota.
+      const data = await getMarketData(WATCHLIST_COINS);
+      if (!data || data.length === 0) throw new Error('Marché vide (données indisponibles)');
     }),
     timed(async () => {
       await db`SELECT 1`;
@@ -75,6 +78,7 @@ export async function GET(request: Request) {
     kraken,
     coinbase,
     coingecko,
+    coingecko_status: getCoinGeckoStatus(),
     db: dbPing,
     openai_configured: Boolean(process.env.OPENAI_API_KEY),
     ...meta,

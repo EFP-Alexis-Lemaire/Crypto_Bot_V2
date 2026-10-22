@@ -1,13 +1,15 @@
 import { NextResponse } from 'next/server';
-import { getMarketData, getFearGreedIndex, getEurUsdRate, getCryptoNews, getBtcBenchmark } from '@/lib/market-data';
-import { WATCHLIST_COINS } from '@/lib/market-data';
+import { getFearGreedIndex, getEurUsdRate, getCryptoNews, getBtcBenchmark, getCoinGeckoStatus, WATCHLIST_COINS } from '@/lib/market-data';
+import { resolveMarketState } from '@/lib/market-service';
+import { getDbContext } from '@/lib/db';
 
 export const revalidate = 60; // Cache for 60 seconds
 
-export async function GET() {
+export async function GET(request: Request) {
+  const ctx = getDbContext(request);
   try {
-    const [marketData, fearGreed, eurUsdRate, news, btcBenchmark] = await Promise.all([
-      getMarketData(WATCHLIST_COINS),
+    const [market, fearGreed, eurUsdRate, news, btcBenchmark] = await Promise.all([
+      resolveMarketState(ctx, WATCHLIST_COINS),
       getFearGreedIndex(),
       getEurUsdRate(),
       getCryptoNews(),
@@ -15,7 +17,14 @@ export async function GET() {
     ]);
 
     return NextResponse.json({
-      marketData: marketData.slice(0, 20),
+      marketData: market.data.slice(0, 20),
+      // 'live' = CoinGecko répond, 'snapshot' = dernier état connu (données périmées)
+      source: market.source,
+      fresh: market.fresh,
+      fetchedAt: market.fetchedAt,
+      ageMinutes: market.ageMinutes,
+      error: market.error,
+      coingecko: getCoinGeckoStatus(),
       fearGreed,
       eurUsdRate,
       news: news.slice(0, 10),

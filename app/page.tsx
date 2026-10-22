@@ -10,6 +10,7 @@ import {
   Bot,
   Newspaper,
   BarChart2,
+  AlertTriangle,
 } from 'lucide-react';
 import PortfolioChart from '@/components/PortfolioChart';
 import PerformanceTable, { SymbolPerformance } from '@/components/PerformanceTable';
@@ -87,6 +88,13 @@ export default function Dashboard() {
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [marketData, setMarketData] = useState<MarketData[]>([]);
+  const [marketStatus, setMarketStatus] = useState<{
+    source?: string;
+    fresh?: boolean;
+    fetchedAt?: string | null;
+    ageMinutes?: number | null;
+    error?: string | null;
+  }>({});
   const [btcBenchmark, setBtcBenchmark] = useState<Array<{ t: number; v: number }> | null>(null);
   const [posExchangeFilter, setPosExchangeFilter] = useState<'all' | 'kraken' | 'coinbase'>('all');
   const [news, setNews] = useState<NewsItem[]>([]);
@@ -170,14 +178,14 @@ export default function Dashboard() {
           fetch('/api/portfolio', { headers: dbHeaders }),
           fetch('/api/decisions?limit=20', { headers: dbHeaders }),
           fetch('/api/trades?limit=30', { headers: dbHeaders }),
-          fetch('/api/market'),
+          fetch('/api/market', { headers: dbHeaders }),
           fetch('/api/config', { headers: dbHeaders }),
           fetch('/api/cycles?limit=30', { headers: dbHeaders }),
           fetch('/api/morning-report', { headers: dbHeaders }),
           fetch('/api/ai-costs', { headers: dbHeaders }),
           fetch('/api/health', { headers: dbHeaders }),
           fetch('/api/protection', { headers: dbHeaders }),
-          fetch('/api/cron/daily-plan', { headers: dbHeaders }),
+          fetch('/api/daily-plan', { headers: dbHeaders }),
         ]);
       await fetchPerformance(perfPeriodRef.current);
 
@@ -200,6 +208,13 @@ export default function Dashboard() {
       if (marketRes.ok) {
         const data = await marketRes.json();
         setMarketData(data.marketData ?? []);
+        setMarketStatus({
+          source: data.source,
+          fresh: data.fresh,
+          fetchedAt: data.fetchedAt ?? null,
+          ageMinutes: data.ageMinutes ?? null,
+          error: data.error ?? null,
+        });
         setFearGreed(data.fearGreed ?? { value: 50, label: 'Neutral' });
         setNews(data.news ?? []);
         setBtcBenchmark(data.btcBenchmark ?? null);
@@ -390,6 +405,33 @@ export default function Dashboard() {
           })}
         </div>
       </header>
+
+      {/* Bandeau état des données marché (quota CoinGecko / péremption) */}
+      {marketStatus.error || marketStatus.fresh === false ? (
+        <div className="max-w-7xl mx-auto px-4 pt-4">
+          <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <div>
+              <p className="font-semibold">Données marché indisponibles ou périmées</p>
+              <p>
+                {marketStatus.error
+                  ? `Erreur CoinGecko : ${marketStatus.error}`
+                  : `Données issues du dernier snapshot (${marketStatus.ageMinutes ?? '?'} min).`}
+                {' '}Les cycles d&apos;analyse et le bot ne transactent pas sur des données périmées.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : marketStatus.source === 'snapshot' ? (
+        <div className="max-w-7xl mx-auto px-4 pt-4">
+          <div className="flex items-start gap-2 rounded-lg border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-300">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>
+              Marché affiché depuis le dernier snapshot disponible ({marketStatus.ageMinutes ?? '?'} min).
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <main className="max-w-7xl mx-auto px-4 py-6">
         {/* OVERVIEW TAB */}

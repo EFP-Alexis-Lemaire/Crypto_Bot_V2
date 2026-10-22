@@ -1,5 +1,6 @@
 import { sqlForContext, DbContext } from './db';
-import { getMarketData, getFearGreedIndex, getEurUsdRate, WATCHLIST_COINS } from './market-data';
+import { getFearGreedIndex, getEurUsdRate, WATCHLIST_COINS } from './market-data';
+import { resolveMarketState } from './market-service';
 import { getPortfolioSummary } from './portfolio';
 import { computeFifo } from './fifo';
 import { getDrawdownReview } from './memory';
@@ -44,11 +45,12 @@ export async function buildDailyInsights(
   const db = sqlForContext(ctx);
 
   // --- Données de base ---
-  const [marketData, fearGreedRaw, eurUsd] = await Promise.all([
-    getMarketData(WATCHLIST_COINS),
+  const [marketState, fearGreedRaw, eurUsd] = await Promise.all([
+    resolveMarketState(ctx, WATCHLIST_COINS),
     getFearGreedIndex() as Promise<{ value: number; label: string }>,
     getEurUsdRate(),
   ]);
+  const marketData = marketState.data;
   const fearGreed = fearGreedRaw as { value: number; label: string };
   const portfolio = await getPortfolioSummary(marketData, env, ctx);
 
@@ -138,7 +140,12 @@ Réponds UNIQUEMENT en JSON valide:
     watchlist: [],
     risks: [],
   };
-  let degraded = false;
+  let degraded = !marketState.fresh;
+  if (degraded) {
+    console.warn(
+      `[DailyInsights] Données marché périmées (${marketState.ageMinutes ?? '?'} min) — insights sur données anciennes.`
+    );
+  }
 
   try {
     const response = await openai.chat.completions.create({
@@ -152,7 +159,7 @@ Réponds UNIQUEMENT en JSON valide:
       response_format: { type: 'json_object' },
     });
     if (response.usage) {
-      await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'daily-insights');
+      await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'daily-insights', ctx);
     }
     const parsed = JSON.parse(response.choices[0].message.content ?? '{}');
     plan = {

@@ -6,9 +6,12 @@ const KRAKEN_API_URL = 'https://api.kraken.com';
 // Nonce strictement croissant : Date.now() seul entre en collision quand
 // plusieurs appels privés partent la même milliseconde (refresh dashboard =
 // ~6 appels concurrents) → Kraken rejette avec "EAPI:Invalid nonce".
+// Base microsecondes : des outils externes (scripts d'audit, autres instances)
+// peuvent utiliser une échelle plus fine ; un nonce en ms deviendrait alors
+// définitivement inférieur au dernier nonce enregistré par Kraken.
 let _lastNonce = 0;
 function nextNonce(): string {
-  const now = Date.now();
+  const now = Date.now() * 1000;
   _lastNonce = Math.max(now, _lastNonce + 1);
   return String(_lastNonce);
 }
@@ -72,6 +75,15 @@ async function krakenPrivate(
     throw new Error(`Kraken API error: ${data.error.join(', ')}`);
   }
   return data.result;
+}
+
+// Accès brut à l'API privée pour les scripts d'audit (même nonce/signature
+// que l'application : une seule échelle de nonce pour toute la clé).
+export async function krakenPrivateRequest<T = unknown>(
+  endpoint: string,
+  params: Record<string, string | number> = {},
+): Promise<T> {
+  return await krakenPrivate(endpoint, params) as T;
 }
 
 async function krakenPublic(
@@ -182,6 +194,76 @@ export async function placeKrakenOrder(
 export async function getKrakenOpenOrders(): Promise<unknown[]> {
   const result = await krakenPrivate('OpenOrders') as { open: Record<string, unknown> };
   return Object.values(result.open ?? {});
+}
+
+// Remplissage réel d'un ordre (frais + prix moyens réels, pas les estimations).
+// À appeler après AddOrder : un market order peut mettre quelques centaines de
+// ms à être "closed", d'où le polling côté live-trader.
+export interface KrakenOrderFill {
+  status: string;
+  volExec: number;
+  // Contrepartie hors frais, en devise de cotation (EUR)
+  cost: number;
+  fee: number;
+  avgPrice: number;
+}
+
+export async function getKrakenOrder(txid: string): Promise<KrakenOrderFill | null> {
+  const result = await krakenPrivate('QueryOrders', { txid }) as Record<string, {
+    status?: string; vol_exec?: string; cost?: string; fee?: string;
+  }>;
+  const order = result[txid];
+  if (!order) return null;
+  const volExec = parseFloat(order.vol_exec ?? '0') || 0;
+  const cost = parseFloat(order.cost ?? '0') || 0;
+  const fee = parseFloat(order.fee ?? '0') || 0;
+  return {
+    status: String(order.status ?? ''),
+    volExec,
+    cost,
+    fee,
+    avgPrice: volExec > 0 ? cost / volExec : 0,
+  };
+}
+
+export interface KrakenLedgerEntry {
+  refid: string;
+  time: number;
+  type: string;
+  subtype: string;
+  asset: string;
+  amount: number;
+  fee: number;
+}
+
+// Ledger fiat (dépôts/retraits) : sert au calcul du P&L net des versements.
+export async function getKrakenLedger(opts?: { type?: string; start?: number }): Promise<KrakenLedgerEntry[]> {
+  const entries: KrakenLedgerEntry[] = [];
+  for (let page = 0; page < 50; page++) {
+    const params: Record<string, string | number> = { ofs: page * 50, asset: 'ZEUR' };
+    if (opts?.type) params.type = opts.type;
+    if (opts?.start) params.start = opts.start;
+    const result = await krakenPrivate('Ledgers', params) as {
+      ledger?: Record<string, {
+        refid: string; time: number; type: string; subtype?: string;
+        asset: string; amount: string; fee?: string;
+      }>;
+    };
+    const rows = Object.values(result.ledger ?? {});
+    for (const row of rows) {
+      entries.push({
+        refid: row.refid,
+        time: Number(row.time),
+        type: row.type,
+        subtype: row.subtype ?? '',
+        asset: row.asset,
+        amount: parseFloat(row.amount) || 0,
+        fee: parseFloat(row.fee ?? '0') || 0,
+      });
+    }
+    if (rows.length < 50) break;
+  }
+  return entries;
 }
 
 // Kraken uses non-standard currency codes

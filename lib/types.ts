@@ -89,6 +89,10 @@ export interface PortfolioSummary {
     kraken: number;
     coinbase: number;
   };
+  // Capital réellement versé utilisé comme base du P&L live
+  // (référence initiale + dépôts postérieurs - retraits).
+  net_contributions_eur?: number;
+  pnl_basis?: 'flows' | 'config';
 }
 
 export interface RiskConfig {

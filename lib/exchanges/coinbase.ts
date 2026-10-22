@@ -240,6 +240,40 @@ export async function placeCoinbaseOrder(
   return result.success_response;
 }
 
+// Remplissage réel d'un ordre (best-effort : la forme exacte des champs peut
+// varier selon la version de l'API/le type de compte).
+export interface CoinbaseOrderFill {
+  status: string;
+  filledSize: number;
+  filledValue: number;
+  totalFees: number;
+  avgPrice: number;
+}
+
+export async function getCoinbaseOrder(orderId: string): Promise<CoinbaseOrderFill | null> {
+  const result = await coinbaseRequest<{
+    order?: {
+      status?: string;
+      filled_size?: string;
+      filled_value?: string;
+      total_fees?: string;
+      average_filled_price?: string;
+    };
+  }>('GET', `/orders/historical/${orderId}`);
+  const order = result.order;
+  if (!order) return null;
+  const filledSize = parseFloat(order.filled_size ?? '0') || 0;
+  const filledValue = parseFloat(order.filled_value ?? '0') || 0;
+  const avgPrice = parseFloat(order.average_filled_price ?? '0') || (filledSize > 0 ? filledValue / filledSize : 0);
+  return {
+    status: String(order.status ?? ''),
+    filledSize,
+    filledValue,
+    totalFees: parseFloat(order.total_fees ?? '0') || 0,
+    avgPrice,
+  };
+}
+
 // Cache des produits réellement tradables sur le compte (la dispo varie
 // selon région/compte : ex. NEAR-EUR peut répondre "Invalid product_id").
 // TTL 1h, fail-open : si la liste est inaccessible, on tente quand même l'ordre.

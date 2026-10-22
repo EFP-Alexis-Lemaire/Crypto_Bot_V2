@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
-import { sqlForContext, DbContext } from '@/lib/db';
-import { getMarketData, getFearGreedIndex } from '@/lib/market-data';
+import { sqlForContext, resolveDbContext } from '@/lib/db';
+import { getFearGreedIndex } from '@/lib/market-data';
+import { resolveMarketState } from '@/lib/market-service';
 import { getPortfolioSummary } from '@/lib/portfolio';
 import { sendDailyReport } from '@/lib/telegram';
 import { BotDecision } from '@/lib/types';
@@ -19,14 +20,8 @@ export async function GET(request: Request) {
   const unauthorized = authorizedByQuery ? null : cronUnauthorized(request);
   if (unauthorized) return unauthorized;
 
-  // Contexte DB : ?ctx=prod (ou ?db=) > header x-db-context > APP_ENV, défaut UAT
-  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
-  const headerCtx = request.headers.get('x-db-context');
-  const dbContext: DbContext = (queryCtx === 'prod' || queryCtx === 'uat')
-    ? queryCtx
-    : (headerCtx === 'prod' || headerCtx === 'uat')
-      ? headerCtx
-      : process.env.APP_ENV === 'production' ? 'prod' : 'uat';
+  // Contexte DB : ?ctx=prod (ou ?db=) > header x-db-context > production => PROD
+  const dbContext = resolveDbContext(request);
   const db = sqlForContext(dbContext);
 
   try {
@@ -34,10 +29,11 @@ export async function GET(request: Request) {
     const isLive = modeRows[0]?.value === 'live';
     const env = isLive ? 'live' : 'paper';
 
-    const [marketData, fearGreedRaw] = await Promise.all([
-      getMarketData(WATCHLIST_COINS),
+    const [marketState, fearGreedRaw] = await Promise.all([
+      resolveMarketState(dbContext, WATCHLIST_COINS),
       getFearGreedIndex(),
     ]);
+    const marketData = marketState.data;
     const fearGreed = fearGreedRaw as { value: number; label: string };
 
     const portfolio = await getPortfolioSummary(marketData, env, dbContext);

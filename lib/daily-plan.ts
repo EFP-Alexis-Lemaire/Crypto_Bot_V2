@@ -1,6 +1,7 @@
 import { sqlForContext, DbContext } from './db';
 import { NextResponse } from 'next/server';
-import { getMarketData, getFearGreedIndex, getEurUsdRate, WATCHLIST_COINS, getBtcDominance } from './market-data';
+import { getFearGreedIndex, getEurUsdRate, WATCHLIST_COINS, getBtcDominance } from './market-data';
+import { resolveMarketState } from './market-service';
 import { getPortfolioSummary } from './portfolio';
 import { getDrawdownReview } from './memory';
 import { logAICost } from './ai-costs';
@@ -85,12 +86,13 @@ export async function generateDailyPlan(
 ): Promise<{ ok: boolean; plan?: DailyPlan; error?: string }> {
   const db = sqlForContext(ctx);
   try {
-    const [marketData, fearGreedRaw, eurUsd, btcDominance] = await Promise.all([
-      getMarketData(WATCHLIST_COINS),
+    const [marketState, fearGreedRaw, eurUsd, btcDominance] = await Promise.all([
+      resolveMarketState(ctx, WATCHLIST_COINS),
       getFearGreedIndex() as Promise<{ value: number; label: string }>,
       getEurUsdRate(),
       getBtcDominance(),
     ]);
+    const marketData = marketState.data;
     const fearGreed = fearGreedRaw as { value: number; label: string };
     const portfolio = await getPortfolioSummary(marketData, env, ctx);
 
@@ -124,6 +126,7 @@ ${lossReview ? `PERTES 3J: ${lossReview.dd_pct.toFixed(2)}% (${lossReview.dd_eur
 === AUJOURD'HUI ===
 Fear & Greed: ${fearGreed.value}/100 (${fearGreed.label})
 Dominance BTC: ${btcDominance !== null ? btcDominance.toFixed(1) + '%' : 'N/A'}
+Données marché: ${marketState.fresh ? 'fraîches (temps réel)' : `PÉRIMÉES (dernière mise à jour il y a ${marketState.ageMinutes ?? '?'} min)`}
 Portefeuille: ${portfolio.total_value_eur.toFixed(2)}€ (cash ${portfolio.cash_eur.toFixed(2)}€)
 Positions: ${holdingsBrief}
 Top mouvements 24h:
@@ -157,7 +160,7 @@ Réponds UNIQUEMENT en JSON valide:
       response_format: { type: 'json_object' },
     });
     if (response.usage) {
-      await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'daily-plan');
+      await logAICost('gpt-4o-mini', response.usage, eurUsd, undefined, 'daily-plan', ctx);
     }
     const parsed = JSON.parse(response.choices[0].message.content ?? '{}');
     const plan: DailyPlan = {

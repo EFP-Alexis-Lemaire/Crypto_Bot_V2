@@ -3,8 +3,11 @@ import { sqlForContext, getDbContext, DbContext } from '@/lib/db';
 import {
   getMarketData, getCryptoNews, getFearGreedIndex, getEurUsdRate,
   getTrendingCoins, getCoinHistory, calculateTechnicalIndicators,
-  getDefiTVL, getBtcDominance, WATCHLIST_COINS, SYMBOL_TO_COINGECKO_ID,
+  getDefiTVL, getBtcDominance, WATCHLIST_COINS, SYMBOL_TO_COINGECKO_ID, getHistoryFetchLimit,
 } from '@/lib/market-data';
+import { resolveMarketState } from '@/lib/market-service';
+import { readDailyPlan, adaptiveStance } from '@/lib/daily-plan';
+import { quickBacktest } from '@/lib/backtest';
 import { analyzeMarketWithAI } from '@/lib/ai-engine';
 import { getPortfolioSummary, executePaperTrade, savePortfolioSnapshot, checkStopLossAndTakeProfit, applyTradeToMemSummary, getDrawdown24h } from '@/lib/portfolio';
 import { executeLiveTrade, syncPortfolioFromExchange } from '@/lib/exchanges/live-trader';
@@ -62,34 +65,50 @@ export async function POST(request: Request) {
       });
     }
 
-    const [marketData, news, fearGreed, eurUsdRate, trendingCoins, defiTVL, btcDominance] = await Promise.all([
-      getMarketData(WATCHLIST_COINS),
+    const [marketState, news, fearGreed, eurUsdRate, trendingCoins, defiTVL, btcDominance] = await Promise.all([
+      resolveMarketState(ctx, WATCHLIST_COINS),
       getCryptoNews(),
       getFearGreedIndex() as Promise<{ value: number; label: string }>,
       getEurUsdRate(), getTrendingCoins(), getDefiTVL(), getBtcDominance(),
     ]);
 
+    // Prix frais obligatoires : pas d'analyse sur des données périmées.
+    if (!marketState.fresh) {
+      const message = `Données marché indisponibles (${marketState.error ?? 'cause inconnue'}) — analyse ignorée.`;
+      console.warn(`[Trigger ${cycleId}] ${message}`);
+      await releaseCycleLock(db);
+      return NextResponse.json({
+        message, trades_executed: 0, decisions: [], skipped: true,
+        market_error: marketState.error, market_age_minutes: marketState.ageMinutes,
+      });
+    }
+    const marketData = marketState.data;
+
     const additionalCoins = trendingCoins.filter(id => !WATCHLIST_COINS.includes(id));
     let allMarketData = [...marketData];
     if (additionalCoins.length > 0) {
-      const trendingData = await getMarketData(additionalCoins);
+      const trendingData = await getMarketData(additionalCoins, { retries: 1 });
       allMarketData = [...marketData, ...trendingData];
     }
 
     const technicalIndicators: TechnicalIndicators[] = [];
+    const historyBySymbol = new Map<string, number[]>();
     let btcPrices: number[] = [];
     await Promise.all(
-      allMarketData.slice(0, 15).map(async coin => {
+      allMarketData.slice(0, getHistoryFetchLimit()).map(async coin => {
         try {
           const coinId = SYMBOL_TO_COINGECKO_ID[coin.symbol] ?? coin.symbol.toLowerCase();
           const history = await getCoinHistory(coinId, 60);
           const prices = history.map(h => h.price);
           if (coin.symbol === 'BTC') btcPrices = prices;
           const volumes = history.map(h => h.volume ?? 0);
-          if (prices.length >= 26) technicalIndicators.push({
-            symbol: coin.symbol,
-            ...calculateTechnicalIndicators(prices, volumes.some(v => v > 0) ? volumes : undefined),
-          });
+          if (prices.length >= 26) {
+            historyBySymbol.set(coin.symbol, prices);
+            technicalIndicators.push({
+              symbol: coin.symbol,
+              ...calculateTechnicalIndicators(prices, volumes.some(v => v > 0) ? volumes : undefined),
+            });
+          }
         } catch (e) {
           console.warn(`[Trigger ${cycleId}] history skip ${coin.symbol}:`, String(e));
         }
@@ -255,6 +274,34 @@ export async function POST(request: Request) {
       console.log(`[Trigger ${cycleId}] Drawdown 3j: ${drawdownReview.dd_pct}% (${drawdownReview.dd_eur}€) — revue injectée`);
     }
 
+    // Plan du jour (même garde-fous que le cycle cron) + backtest rapide
+    const dailyPlan = await readDailyPlan(db);
+    const planStance = dailyPlan?.stance ?? 'selective';
+    const dd24 = await getDrawdown24h(ctx, currentEnv);
+    const stance = adaptiveStance(planStance, dd24);
+
+    const backtestScores: Record<string, number> = {};
+    await Promise.all(
+      allMarketData.slice(0, 5).map(async m => {
+        try {
+          const coinId = SYMBOL_TO_COINGECKO_ID[m.symbol] ?? m.symbol.toLowerCase();
+          const tech = technicalIndicators.find(t => t.symbol === m.symbol);
+          if (!tech) return;
+          const prices = historyBySymbol.get(m.symbol);
+          if (!prices) return;
+          const bt = await quickBacktest(coinId, {
+            rsi: tech.rsi_14 ?? 50,
+            roc30: tech.roc_30d ?? 0,
+            vol: tech.volatility_pct ?? 0,
+            bbWidth: tech.bb_width_pct ?? 0,
+            fearGreed: fearGreed.value,
+            trend: tech.trend,
+          }, fearGreed.value, prices);
+          if (bt) backtestScores[m.symbol] = bt.score;
+        } catch { /* backtest non-bloquant */ }
+      })
+    );
+
     const decisions = await analyzeMarketWithAI({
       marketData: allMarketData, technicalIndicators, news, fearGreedIndex: fearGreed, defiTVL,
       currentPortfolio: {
@@ -270,6 +317,8 @@ export async function POST(request: Request) {
       dbContext: ctx,
       marketRegime: { breadth_pct: breadth, btc_dominance: btcDominance, dip_mode: dipMode, btc_drawdown_30d: btcDrawdown },
       drawdownReview,
+      dailyPlan: dailyPlan ? { stance, summary: dailyPlan.summary, expected_actions: dailyPlan.expected_actions } : null,
+      backtestScores,
     });
 
     // Suivi mémoire du cash par exchange pour les BUYs successifs du même cycle

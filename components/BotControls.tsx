@@ -231,7 +231,7 @@ export default function BotControls({ config, onConfigChange, dbContext }: Props
     setLoading(true);
     setMessage('Génération du plan du jour...');
     try {
-      const res = await fetch('/api/cron/daily-plan', {
+      const res = await fetch('/api/daily-plan', {
         method: 'POST',
         headers: { 'x-db-context': dbContext },
       });

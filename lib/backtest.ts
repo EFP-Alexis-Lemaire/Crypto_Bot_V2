@@ -72,21 +72,29 @@ function volDaily(prices: number[]): number {
 
 // Backtest : interroge l'historique 60j d'un coin, trouve les setups similaires
 // à celui d'aujourd'hui et mesure la perf forward 7j. Appelé par cycle (1 coin).
+// `prices` : si fourni (historique déjà chargé par le cycle pour les
+// indicateurs), on ne refait PAS d'appel CoinGecko — chaque appel compte
+// dans le quota mensuel, on ne gaspille rien.
 export async function quickBacktest(
   coinId: string,
   target: SetupFeatures,
   fearGreedValue: number,
+  prices?: number[]
 ): Promise<BacktestResult | null> {
   try {
-    const history = await getCoinHistory(coinId, 60);
-    const prices = history.map(h => h.price);
-    if (prices.length < 40) return null;
+    let series = prices;
+    if (!series || series.length < 40) {
+      const history = await getCoinHistory(coinId, 60);
+      series = history.map(h => h.price);
+    }
+    const priceSeries = series;
+    if (priceSeries.length < 40) return null;
 
     // Fenêtres glissantes : chaque point t du passé avec données suffisantes
     const gains: number[] = [];
     const feats: SetupFeatures[] = [];
-    for (let t = 30; t < prices.length - 7; t++) {
-      const window = prices.slice(0, t + 1);
+    for (let t = 30; t < priceSeries.length - 7; t++) {
+      const window = priceSeries.slice(0, t + 1);
       const r = rsi14(window);
       if (r === null || !(r > 0)) continue;
       const feat: SetupFeatures = {
@@ -99,7 +107,7 @@ export async function quickBacktest(
       };
       feats.push(feat);
       const ref = window[window.length - 1];
-      const future = prices[t + 7] ?? prices[prices.length - 1];
+      const future = priceSeries[t + 7] ?? priceSeries[priceSeries.length - 1];
       gains.push(ref > 0 ? ((future - ref) / ref) * 100 : 0);
     }
 

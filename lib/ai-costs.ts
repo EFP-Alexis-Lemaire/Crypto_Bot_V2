@@ -1,4 +1,4 @@
-import { sql, sqlForContext, DbContext } from './db';
+import { sqlForContext, DbContext } from './db';
 
 // OpenAI pricing (USD per 1M tokens) — updated 2024
 const PRICING: Record<string, { input: number; output: number }> = {
@@ -24,13 +24,17 @@ export async function logAICost(
   usage: TokenUsage,
   eurUsdRate: number,
   cycleId?: string,
-  purpose = 'analysis'
+  purpose = 'analysis',
+  ctx: DbContext = 'uat'
 ): Promise<void> {
   try {
     const costUsd = calculateCostUSD(model, usage);
     const costEur = costUsd * eurUsdRate;
 
-    await sql`
+    // Le coût est écrit dans la DB du contexte (UAT ou PROD) : sinon tous les
+    // coûts du live finissent dans la base UAT et le suivi prod est vide.
+    const db = sqlForContext(ctx);
+    await db`
       INSERT INTO ai_costs
         (cycle_id, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_eur, purpose)
       VALUES

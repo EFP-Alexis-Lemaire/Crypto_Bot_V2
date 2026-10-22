@@ -71,6 +71,32 @@ export function getDbContext(request: Request): DbContext {
   return header === 'prod' ? 'prod' : 'uat';
 }
 
+// True quand on tourne sur le déploiement Vercel de production (ou APP_ENV=production)
+export function isProduction(): boolean {
+  return process.env.VERCEL_ENV === 'production' || process.env.APP_ENV === 'production';
+}
+
+// Contexte DB d'une requête, ordre de priorité :
+//   1. ?ctx=prod|uat (ou ?db=)  — explicite, utilisé par cron-job.org
+//   2. header x-db-context      — utilisé par le dashboard (toggle UAT/PROD)
+//   3. production (VERCEL_ENV/APP_ENV) -> 'prod', sinon 'uat'
+// Avant, chaque route avait son propre fallback : le plan du jour partait
+// sur UAT alors que les cycles tournaient sur PROD (le plan n'était jamais
+// appliqué en prod). Une seule règle, partout.
+export function resolveDbContext(request: Request): DbContext {
+  const url = new URL(request.url);
+  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
+  if (queryCtx === 'prod' || queryCtx === 'uat') return queryCtx;
+  const headerCtx = request.headers.get('x-db-context');
+  if (headerCtx === 'prod' || headerCtx === 'uat') return headerCtx;
+  if (isProduction()) return 'prod';
+  // Hors prod et hors localhost = déploiement (preview) : on garde le
+  // comportement historique des cycles (PROD), sinon on casse les crons.
+  const host = url.hostname;
+  if (host.includes('localhost') || host.includes('127.0.0.1')) return 'uat';
+  return 'prod';
+}
+
 export async function initializeDatabase() {
   const db = getSQL();
 

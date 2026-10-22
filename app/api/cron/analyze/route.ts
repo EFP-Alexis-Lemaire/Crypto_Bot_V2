@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { sqlForContext } from '@/lib/db';
+import { sqlForContext, resolveDbContext } from '@/lib/db';
 import {
   getMarketData,
   getCryptoNews,
@@ -10,9 +10,11 @@ import {
   calculateTechnicalIndicators,
   getDefiTVL,
   getBtcDominance,
+  getHistoryFetchLimit,
   WATCHLIST_COINS,
   SYMBOL_TO_COINGECKO_ID,
 } from '@/lib/market-data';
+import { resolveMarketState } from '@/lib/market-service';
 import { analyzeMarketWithAI } from '@/lib/ai-engine';
 import {
   getPortfolioSummary,
@@ -50,20 +52,10 @@ export async function GET(request: Request) {
   if (unauthorized) return unauthorized;
 
   const cycleId = uuidv4();
-  // DB cible : priorité au param explicite (?ctx=prod ou ?db=prod) puis header
-  // x-db-context (utile pour cron-job.org), sinon APP_ENV (Vercel crons natifs).
-  // Sans indication explicite sur l'URL de prod, on suppose PROD pour éviter
-  // d'écrire les cycles prod en UAT.
-  const url = new URL(request.url);
-  const queryCtx = url.searchParams.get('ctx') ?? url.searchParams.get('db');
-  const headerCtx = request.headers.get('x-db-context');
-  const dbContext = (queryCtx === 'prod' || queryCtx === 'uat')
-    ? queryCtx
-    : (headerCtx === 'prod' || headerCtx === 'uat')
-      ? headerCtx
-      : process.env.APP_ENV === 'production'
-        ? 'prod'
-        : (url.hostname.includes('localhost') || url.hostname.includes('127.0.0.1') ? 'uat' : 'prod');
+  // DB cible : ?ctx=prod|uat > header x-db-context > production => PROD
+  // (une seule règle pour tous les cycles : le plan du jour et les cycles
+  //  d'analyse doivent taper dans la MÊME base).
+  const dbContext = resolveDbContext(request);
   const db = sqlForContext(dbContext);
   console.log(`[Bot Cycle ${cycleId}] Starting analysis on ${dbContext} DB...`);
 
@@ -122,7 +114,7 @@ export async function GET(request: Request) {
     // Fetch all data in parallel
     console.log(`[Bot Cycle ${cycleId}] Fetching market data...`);
     const [
-      marketData,
+      marketState,
       news,
       fearGreed,
       eurUsdRate,
@@ -130,7 +122,7 @@ export async function GET(request: Request) {
       defiTVL,
       btcDominance,
     ] = await Promise.all([
-      getMarketData(WATCHLIST_COINS),
+      resolveMarketState(dbContext, WATCHLIST_COINS),
       getCryptoNews(),
       getFearGreedIndex() as Promise<{ value: number; label: string }>,
       getEurUsdRate(),
@@ -139,20 +131,49 @@ export async function GET(request: Request) {
       getBtcDominance(),
     ]);
 
+    // Données marché indisponibles (quota CoinGecko épuisé, API down, ...) :
+    // on n'analyse JAMAIS sur des prix périmés ni vides — un stop calculé sur
+    // un prix vieux de 2 h est un stop faux. On trace la cause et on sort.
+    if (!marketState.fresh) {
+      const reason = `Données marché indisponibles (${marketState.error ?? 'cause inconnue'}). Cycle avorté : aucun trade sur données périmées.`;
+      console.log(`[Bot Cycle ${cycleId}] ${reason}`);
+      await db`
+        INSERT INTO bot_decisions (cycle_id, symbol, action, reasoning, confidence, risk_score, model_used, env)
+        VALUES (${cycleId}, NULL, 'SKIP', ${reason}, 0, 0, 'market-unavailable', ${currentEnv})
+      `;
+      await releaseCycleLock(db);
+      return NextResponse.json({
+        cycle_id: cycleId,
+        ctx: dbContext,
+        env: currentEnv,
+        trades_executed: 0,
+        skipped: true,
+        market_error: marketState.error,
+        market_age_minutes: marketState.ageMinutes,
+      });
+    }
+    const marketData = marketState.data;
+
     // Add trending coins to market data if not already there
     const additionalCoins = trendingCoins.filter(
       id => !WATCHLIST_COINS.includes(id)
     );
     let allMarketData = [...marketData];
     if (additionalCoins.length > 0) {
-      const trendingData = await getMarketData(additionalCoins);
+      // 1 seule tentative : les coins tendance sont un bonus, pas une
+      // priorité — on ne gaspille pas le quota CoinGecko là-dessus.
+      const trendingData = await getMarketData(additionalCoins, { retries: 1 });
       allMarketData = [...marketData, ...trendingData];
     }
 
     // Calculate technical indicators for top coins
     console.log(`[Bot Cycle ${cycleId}] Calculating technical indicators...`);
     const technicalIndicators: TechnicalIndicators[] = [];
-    const topCoins = allMarketData.slice(0, 15);
+    // 15 coins avec une clé (30 appels/min) ; 6 en API publique anonyme
+    // (au-delà, CoinGecko répond 429 et on perd tous les indicateurs).
+    const topCoins = allMarketData.slice(0, getHistoryFetchLimit());
+    // Historique réutilisé pour le backtest (évite 5 appels CoinGecko/cycle)
+    const historyBySymbol = new Map<string, number[]>();
 
     // Un coin invalide (ex: trending "gram" délisté) ne doit jamais faire échouer le cycle
     let btcPrices: number[] = [];
@@ -167,6 +188,7 @@ export async function GET(request: Request) {
           const volumes = history.map(h => h.volume ?? 0);
 
           if (prices.length >= 26) {
+            historyBySymbol.set(coin.symbol, prices);
             const indicators = calculateTechnicalIndicators(
               prices,
               volumes.some(v => v > 0) ? volumes : undefined
@@ -351,6 +373,10 @@ export async function GET(request: Request) {
           const coinId = SYMBOL_TO_COINGECKO_ID[m.symbol] ?? m.symbol.toLowerCase();
           const tech = technicalIndicators.find(t => t.symbol === m.symbol);
           if (!tech) return;
+          // Pas d'historique en cache => on n'appelle PAS CoinGecko (quota) :
+          // le backtest est un bonus, pas un bloc.
+          const prices = historyBySymbol.get(m.symbol);
+          if (!prices) return;
           const bt = await quickBacktest(coinId, {
             rsi: tech.rsi_14 ?? 50,
             roc30: tech.roc_30d ?? 0,
@@ -358,7 +384,7 @@ export async function GET(request: Request) {
             bbWidth: tech.bb_width_pct ?? 0,
             fearGreed: fearGreed.value,
             trend: tech.trend,
-          }, fearGreed.value);
+          }, fearGreed.value, prices);
           if (bt) backtestScores[m.symbol] = bt.score;
         } catch { /* backtest non-bloquant */ }
       })
