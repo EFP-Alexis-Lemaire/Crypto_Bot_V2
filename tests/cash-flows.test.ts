@@ -36,6 +36,26 @@ describe.skipIf(!sql)('P&L net des versements (UAT)', () => {
     expect(result.inception).toBe('2026-01-10T12:00:00.000Z');
   });
 
+  it('ne compte que les flux postérieurs à la dernière édition du capital', async () => {
+    const env = `e${uniqueSuffix()}`.slice(0, 10);
+    envs.push(env);
+
+    const insertFlow = (kind: string, amount: number, id: string, at: string) => sql!`
+      INSERT INTO cash_flows (env, exchange, kind, amount_eur, external_id, occurred_at)
+      VALUES (${env}, 'kraken', ${kind}, ${amount}, ${id}, ${at})`;
+
+    await insertFlow('deposit', 500, `${env}-d0`, '2026-01-01T00:00:00Z');
+    await insertFlow('deposit', 295, `${env}-d1`, '2026-01-20T00:00:00Z');
+    await insertFlow('withdrawal', 50, `${env}-w1`, '2026-01-25T00:00:00Z');
+
+    const result = await getNetContributions(sql!, env, 1405, '2026-01-22T00:00:00Z');
+    expect(result.basis).toBe('flows');
+    expect(result.deposits).toBe(0);
+    expect(result.withdrawals).toBe(50);
+    expect(result.total).toBe(1405 - 50);
+    expect(result.inception).toBe('2026-01-22T00:00:00Z');
+  });
+
   it('sans table/données incohérentes -> repli sur la référence de config', async () => {
     const result = await getNetContributions(sql!, 'env-inexistant', 1400);
     expect(result.total).toBe(1400);

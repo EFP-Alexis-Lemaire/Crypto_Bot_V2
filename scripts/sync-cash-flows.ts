@@ -65,13 +65,11 @@ for (const e of withdrawals) {
   console.log(`  ${new Date(e.time * 1000).toISOString()} -${Math.abs(e.amount).toFixed(2)}€ ref=${e.refid} subtype=${e.subtype}`);
 }
 
-const configRows = await run(`SELECT value FROM bot_config WHERE key = 'initial_portfolio_eur'`);
+const configRows = await run(`SELECT value, updated_at FROM bot_config WHERE key = 'initial_portfolio_eur'`);
 const initial = parseFloat(String(configRows[0]?.value ?? '1400'));
-const tradeRows = await run(`SELECT MIN(executed_at) AS at FROM trades WHERE env = 'live'`);
-const rawInception = tradeRows[0]?.at;
-const inception = rawInception ? new Date(rawInception as string).toISOString() : null;
-const flowRows = inception
-  ? await run(`SELECT kind, COALESCE(SUM(amount_eur),0) AS total FROM cash_flows WHERE env = 'live' AND occurred_at >= '${inception}' GROUP BY kind`)
+const editedAt = configRows[0]?.updated_at ? new Date(String(configRows[0].updated_at)).toISOString() : null;
+const flowRows = editedAt
+  ? await run(`SELECT kind, COALESCE(SUM(amount_eur),0) AS total FROM cash_flows WHERE env = 'live' AND occurred_at > '${editedAt}' GROUP BY kind`)
   : await run(`SELECT kind, COALESCE(SUM(amount_eur),0) AS total FROM cash_flows WHERE env = 'live' GROUP BY kind`);
 let dep = 0;
 let wit = 0;
@@ -80,5 +78,5 @@ for (const row of flowRows) {
   if (row.kind === 'withdrawal') wit += Number(row.total);
 }
 console.log('');
-console.log(`Référence config: ${initial.toFixed(2)}€ | dépôts inclus: ${dep.toFixed(2)}€ | retraits: ${wit.toFixed(2)}€`);
-console.log(`Capital versé retenu: ${(initial + dep - wit).toFixed(2)}€ (inception ${inception ?? 'aucun trade'})`);
+console.log(`Référence: ${initial.toFixed(2)}€ (éditée ${editedAt ?? 'jamais'}) | flux postérieurs: +${dep.toFixed(2)}€ / -${wit.toFixed(2)}€`);
+console.log(`Capital versé retenu: ${(initial + dep - wit).toFixed(2)}€`);

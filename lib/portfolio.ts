@@ -140,11 +140,14 @@ export async function getPortfolioSummary(
 
   // Read initial capital from DB (context-aware), fallback to env var then 5000
   const initialConfigRows = (await db`
-    SELECT value FROM bot_config WHERE key = 'initial_portfolio_eur'
+    SELECT value, updated_at FROM bot_config WHERE key = 'initial_portfolio_eur'
   `) as Row[];
   const initial = initialConfigRows.length > 0
     ? parseFloat(str(initialConfigRows[0], 'value'))
     : parseFloat(process.env.INITIAL_PORTFOLIO_EUR ?? '5000');
+  const initialEditedAt = initialConfigRows.length > 0 && initialConfigRows[0].updated_at
+    ? new Date(String(initialConfigRows[0].updated_at)).toISOString()
+    : null;
 
   // Référence du P&L : en live, capital réellement versé (référence + dépôts
   // postérieurs - retraits), pas une constante de config qui ignore les
@@ -152,7 +155,7 @@ export async function getPortfolioSummary(
   let costBasis = initial;
   let pnlBasis: 'flows' | 'config' = 'config';
   if (env === 'live') {
-    const contributions = await getNetContributions(db, env, initial);
+    const contributions = await getNetContributions(db, env, initial, initialEditedAt);
     costBasis = contributions.total;
     pnlBasis = contributions.basis;
   }

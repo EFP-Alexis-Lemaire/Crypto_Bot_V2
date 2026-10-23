@@ -20,12 +20,12 @@ export interface SyncCashFlowsResult {
   error?: string;
 }
 
-// Verbatim des types de ledger fiat Ã  importer. Les mouvements internes
+// Verbatim des types de ledger fiat à importer. Les mouvements internes
 // (trade, receive, spend, conversion) et les frais de ledger ne sont PAS des
 // versements/retraits de capital : les inclure fausserait le P&L.
 const CASH_FLOW_TYPES = ['deposit', 'withdrawal'] as const;
 
-// Importe les dÃ©pÃ´ts/retraits fiat Kraken (ZEUR) dans cash_flows.
+// Importe les dépôts/retraits fiat Kraken (ZEUR) dans cash_flows.
 // Idempotent : external_id (refid Kraken) unique par exchange.
 export async function syncKrakenCashFlows(db: Db, env: string): Promise<SyncCashFlowsResult> {
   let scanned = 0;
@@ -51,22 +51,31 @@ export async function syncKrakenCashFlows(db: Db, env: string): Promise<SyncCash
     return { scanned, inserted };
   } catch (e) {
     if (isMissingSchemaError(e)) {
-      return { scanned, inserted, error: 'table cash_flows absente (migration non appliquÃ©e)' };
+      return { scanned, inserted, error: 'table cash_flows absente (migration non appliquée)' };
     }
     return { scanned, inserted, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
-// Capital rÃ©ellement versÃ© : rÃ©fÃ©rence initiale + dÃ©pÃ´ts postÃ©rieurs au premier
-// trade live - retraits. Les versements antÃ©rieurs au premier trade sont dÃ©jÃ 
-// censÃ©s Ãªtre couverts par la rÃ©fÃ©rence initiale (sinon double comptage).
-export async function getNetContributions(db: Db, env: string, initialConfig: number): Promise<NetContributions> {
+// Capital réellement versé : référence (`initial_portfolio_eur`, déjà ajustée
+// par l'utilisateur lors d'un virement/retrait) + dépôts/retraits survenus
+// APRÈS la dernière édition de cette référence. Les mouvements antérieurs sont
+// déjà intégrés à la référence : les recompter gonflerait le capital et ferait
+// apparaître une fausse perte.
+// `flowSince` = date de dernière édition de `initial_portfolio_eur` ; à défaut,
+// on retombe sur le premier trade live.
+export async function getNetContributions(
+  db: Db,
+  env: string,
+  initialConfig: number,
+  flowSince?: string | null,
+): Promise<NetContributions> {
   const fallback: NetContributions = {
     initial: initialConfig,
     deposits: 0,
     withdrawals: 0,
     total: initialConfig,
-    inception: null,
+    inception: flowSince ?? null,
     basis: 'config',
     complete: false,
   };
@@ -75,15 +84,26 @@ export async function getNetContributions(db: Db, env: string, initialConfig: nu
       SELECT MIN(executed_at) AS at FROM trades WHERE env = ${env}
     `) as Row[];
     const rawInception = inceptionRows[0]?.at;
-    const inception = rawInception ? new Date(rawInception as string | number | Date).toISOString() : null;
+    const tradeInception = rawInception
+      ? new Date(rawInception as string | number | Date).toISOString()
+      : null;
+    const since = flowSince ?? tradeInception;
+    const strict = flowSince != null;
 
-    const flows = (inception
-      ? await db`
-          SELECT kind, COALESCE(SUM(amount_eur), 0) AS total, COUNT(*) AS n
-          FROM cash_flows
-          WHERE env = ${env} AND occurred_at >= ${inception}
-          GROUP BY kind
-        `
+    const flows = (since
+      ? strict
+        ? await db`
+            SELECT kind, COALESCE(SUM(amount_eur), 0) AS total, COUNT(*) AS n
+            FROM cash_flows
+            WHERE env = ${env} AND occurred_at > ${since}
+            GROUP BY kind
+          `
+        : await db`
+            SELECT kind, COALESCE(SUM(amount_eur), 0) AS total, COUNT(*) AS n
+            FROM cash_flows
+            WHERE env = ${env} AND occurred_at >= ${since}
+            GROUP BY kind
+          `
       : await db`
           SELECT kind, COALESCE(SUM(amount_eur), 0) AS total, COUNT(*) AS n
           FROM cash_flows
@@ -104,13 +124,13 @@ export async function getNetContributions(db: Db, env: string, initialConfig: nu
       deposits,
       withdrawals,
       total: initialConfig + deposits - withdrawals,
-      inception,
+      inception: since,
       basis: 'flows',
       complete: true,
     };
   } catch (e) {
     if (!isMissingSchemaError(e)) {
-      console.error('[CashFlows] calcul du capital versÃ© impossible:', e instanceof Error ? e.message : String(e));
+      console.error('[CashFlows] calcul du capital versé impossible:', e instanceof Error ? e.message : String(e));
     }
     return fallback;
   }
